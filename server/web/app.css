@@ -1,7 +1,8 @@
 :root{font-family:system-ui,-apple-system,Arial,sans-serif;color:#171a1d;background:#f5f5f3;font-size:14px}
 *,*::before,*::after{box-sizing:border-box;border-radius:0!important}
 body{margin:0}main{max-width:1050px;margin:0 auto;padding:40px 24px}
-header{display:flex;align-items:baseline;justify-content:space-between;border-bottom:2px solid #171a1d;padding-bottom:12px;margin-bottom:22px}
+header{display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #171a1d;padding-bottom:12px;margin-bottom:22px}
+.brand{display:flex;align-items:center;gap:12px}.brand img{width:40px;height:40px;object-fit:contain}
 h1{font-size:24px;letter-spacing:.08em;margin:0}header span,.caption{font-size:11px;letter-spacing:.08em;color:#666}
 section{border:1px solid #b7bbbc;background:#fff;margin-bottom:16px;padding:20px}h2{font-size:12px;letter-spacing:.1em;margin:0 0 18px}
 .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.grid strong{display:block;margin-top:8px;overflow-wrap:anywhere;font-size:13px}

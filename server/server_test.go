@@ -10,8 +10,31 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestWebUIBranding(t *testing.T) {
+	s := setup(t)
+	tests := []struct {
+		path, contentType string
+	}{
+		{"/", "text/html"},
+		{"/icon.png", "image/png"},
+		{"/app.css", "text/css"},
+	}
+	for _, tt := range tests {
+		r := httptest.NewRequest("GET", tt.path, nil)
+		w := httptest.NewRecorder()
+		s.adminRoutes().ServeHTTP(w, r)
+		if w.Code != http.StatusOK || !strings.HasPrefix(w.Header().Get("Content-Type"), tt.contentType) {
+			t.Errorf("GET %s: status %d, content-type %q", tt.path, w.Code, w.Header().Get("Content-Type"))
+		}
+		if tt.path == "/icon.png" && !bytes.HasPrefix(w.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
+			t.Errorf("branded icon is not a PNG")
+		}
+	}
+}
 
 func setup(t *testing.T) *Server {
 	t.Helper()

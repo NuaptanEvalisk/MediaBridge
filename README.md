@@ -1,4 +1,8 @@
-# MediaBridge
+<p align="center">
+  <img src="assets/mediabridge-icon.png" alt="MediaBridge logo" width="156">
+</p>
+
+<h1 align="center">MediaBridge</h1>
 
 **MediaBridge** is a self-hosted directory uploader for moving large collections
 of files from a native Qt desktop application to private storage over

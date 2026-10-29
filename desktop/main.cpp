@@ -13,6 +13,7 @@
 #include <QGroupBox>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -24,6 +25,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProgressBar>
+#include <QPixmap>
 #include <QPushButton>
 #include <QRandomGenerator>
 #include <QRegularExpression>
@@ -61,6 +63,7 @@ class MainWindow final : public QMainWindow {
 public:
     MainWindow() {
         setWindowTitle("MediaBridge — Chelonia");
+        setWindowIcon(QIcon(":/branding/icon.png"));
         resize(790, 540);
         auto *root = new QWidget;
         auto *v = new QVBoxLayout(root);
@@ -70,7 +73,13 @@ public:
         titleFont.setBold(true);
         titleFont.setPointSize(titleFont.pointSize() + 3);
         heading->setFont(titleFont);
-        v->addWidget(heading);
+        auto *header = new QHBoxLayout;
+        auto *brand = new QLabel;
+        brand->setPixmap(QPixmap(":/branding/icon.png").scaled(44, 44,
+            Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        header->addWidget(brand);
+        header->addWidget(heading, 1);
+        v->addLayout(header);
 
         auto *serverBox = new QGroupBox("Server / Device approval");
         auto *serverLayout = new QVBoxLayout(serverBox);
@@ -646,6 +655,7 @@ int main(int argc, char **argv) {
     QApplication app(argc,argv);
     app.setApplicationName("MediaBridge");
     app.setOrganizationName("Evalisk");
+    app.setWindowIcon(QIcon(":/branding/icon.png"));
     MainWindow window;
     window.show();
     return app.exec();

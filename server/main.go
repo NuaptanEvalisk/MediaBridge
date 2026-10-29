@@ -75,15 +75,7 @@ func main() {
 		}
 		s.allowed = append(s.allowed, netw)
 	}
-	admin := http.NewServeMux()
-	admin.HandleFunc("GET /", s.adminPage)
-	admin.HandleFunc("GET /app.js", s.adminAsset)
-	admin.HandleFunc("GET /app.css", s.adminAsset)
-	admin.HandleFunc("GET /admin/api/state", s.adminState)
-	admin.HandleFunc("POST /admin/api/approve/{id}", s.approve)
-	admin.HandleFunc("POST /admin/api/revoke/{id}", s.revoke)
-	admin.HandleFunc("POST /admin/api/tailscale/login", s.tailscaleLogin)
-	admin.HandleFunc("POST /admin/api/tailscale/logout", s.tailscaleLogout)
+	admin := s.adminRoutes()
 	data := http.NewServeMux()
 	data.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, map[string]string{"status": "ok"}) })
 	data.HandleFunc("POST /api/v1/pair", s.pair)
@@ -105,6 +97,20 @@ func main() {
 	go s.ensureTailnetForward()
 	log.Printf("Tailnet receiver listening on %s", dataSrv.Addr)
 	log.Fatal(dataSrv.ListenAndServe())
+}
+
+func (s *Server) adminRoutes() *http.ServeMux {
+	admin := http.NewServeMux()
+	admin.HandleFunc("GET /", s.adminPage)
+	admin.HandleFunc("GET /app.js", s.adminAsset)
+	admin.HandleFunc("GET /app.css", s.adminAsset)
+	admin.HandleFunc("GET /icon.png", s.adminAsset)
+	admin.HandleFunc("GET /admin/api/state", s.adminState)
+	admin.HandleFunc("POST /admin/api/approve/{id}", s.approve)
+	admin.HandleFunc("POST /admin/api/revoke/{id}", s.revoke)
+	admin.HandleFunc("POST /admin/api/tailscale/login", s.tailscaleLogin)
+	admin.HandleFunc("POST /admin/api/tailscale/logout", s.tailscaleLogout)
+	return admin
 }
 
 // Configure raw TCP forwarding only after the node has joined its tailnet.
@@ -205,7 +211,7 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) adminAsset(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/")
-	if name != "app.js" && name != "app.css" {
+	if name != "app.js" && name != "app.css" && name != "icon.png" {
 		http.NotFound(w, r)
 		return
 	}
@@ -216,8 +222,10 @@ func (s *Server) adminAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	if name == "app.js" {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	} else {
+	} else if name == "app.css" {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	} else {
+		w.Header().Set("Content-Type", "image/png")
 	}
 	_, _ = w.Write(b)
 }
