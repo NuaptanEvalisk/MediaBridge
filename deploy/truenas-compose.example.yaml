@@ -6,13 +6,13 @@ services:
   tailscale:
     image: tailscale/tailscale:v1.104.2
     hostname: media-ingest
-    environment:
-      TS_HOSTNAME: media-ingest
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_SOCKET: /run/tailscale/tailscaled.sock
-      TS_AUTH_ONCE: "true"
-      TS_USERSPACE: "false"
-      TS_ACCEPT_DNS: "false"
+    # Run tailscaled directly. containerboot exits after an interactive login
+    # times out, which must not take the management WebUI offline.
+    entrypoint: ["/usr/local/bin/tailscaled"]
+    command:
+      - --state=/var/lib/tailscale/tailscaled.state
+      - --socket=/run/tailscale/tailscaled.sock
+      - --tun=tailscale0
     volumes:
       - /mnt/POOL/apps/mediabridge/tailscale:/var/lib/tailscale
       - tailscale-socket:/run/tailscale
@@ -21,18 +21,19 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    ports:
-      # Management only. Do NOT publish receiver port 8081.
-      - "NAS_LAN_IP:30079:8080/tcp"
     restart: unless-stopped
 
   mediabridge:
     # Replace this placeholder with an actually published image.
     image: ghcr.io/nuaptanevalisk/mediabridge-server:latest
     user: "0:568"
-    network_mode: "service:tailscale"
+    # Independent network namespace: restarting tailscale must not orphan the
+    # management WebUI. The sidecar forwards TCP 8081 using Tailscale Serve.
     depends_on:
       - tailscale
+    ports:
+      # Management only. Do NOT publish receiver port 8081.
+      - "NAS_LAN_IP:30079:8080/tcp"
     environment:
       MB_MEDIA_DIR: /media
       MB_STATE_DIR: /state

@@ -98,8 +98,39 @@ func main() {
 			log.Fatal(err)
 		}
 	}()
+	go s.ensureTailnetForward()
 	log.Printf("Tailnet receiver listening on %s", dataSrv.Addr)
 	log.Fatal(dataSrv.ListenAndServe())
+}
+
+// Configure raw TCP forwarding only after the node has joined its tailnet.
+// It uses a Docker-network service name, so the HTTP receiver has no host-port
+// publication and remains reachable only through Tailscale's identity policy.
+func (s *Server) ensureTailnetForward() {
+	ticker := time.NewTicker(12 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+		status := exec.CommandContext(ctx, "tailscale", "--socket="+env("MB_TS_SOCKET", "/run/tailscale/tailscaled.sock"), "status", "--json")
+		b, err := status.Output()
+		cancel()
+		var state struct {
+			BackendState string `json:"BackendState"`
+		}
+		if err != nil || json.Unmarshal(b, &state) != nil || state.BackendState != "Running" {
+			continue
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 9*time.Second)
+		cmd := exec.CommandContext(ctx, "tailscale", "--socket="+env("MB_TS_SOCKET", "/run/tailscale/tailscaled.sock"), "serve", "--bg", "--tcp=8081", "tcp://mediabridge:8081")
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			log.Printf("unable to configure Tailnet receiver forward: %v %s", err, strings.TrimSpace(string(out)))
+			continue
+		}
+		log.Printf("Tailnet receiver forwarding configured on TCP 8081")
+		return
+	}
 }
 
 func respond(w http.ResponseWriter, status int, v any) {

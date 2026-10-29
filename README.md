@@ -96,8 +96,11 @@ network. The receiver is intended for traffic encrypted by Tailscale.
    `/mnt/tank/apps/mediabridge/` through TrueNAS-supported mechanisms.
 2. Build and publish the server image from `server/Dockerfile`; replace the
    image placeholder in `deploy/truenas-compose.example.yaml`.
-3. Install as a TrueNAS Custom App using the Compose template. Verify kernel
-   TUN support, socket permission and Tailscale CLI login/logout from the WebUI.
+3. Install as a TrueNAS Custom App using the Compose template. The separate
+   Tailscale container runs `tailscaled` directly, so the management service
+   stays available throughout interactive login. When logged in, the receiver
+   configures private Tailscale Serve raw-TCP forwarding to `mediabridge:8081`.
+   Verify kernel TUN support, socket permission, login/logout and forwarding.
 4. Make `mbridge.evalisk.org` an Access-protected Cloudflare Tunnel hostname
    routed by ZBook to `http://192.168.88.11:30079`.
 5. Verify the management-source CIDR allowlist and deny access from other LAN
