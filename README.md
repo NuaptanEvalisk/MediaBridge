@@ -1,90 +1,109 @@
 # MediaBridge
 
-MediaBridge is a small, GPLv3-licensed, private directory uploader for a single
-openSUSE Tumbleweed desktop and a TrueNAS SCALE Jellyfin media dataset.
+**MediaBridge** is a self-hosted directory uploader for moving large collections
+of files from a native Qt desktop application to private storage over
+[Tailscale](https://tailscale.com/). It pairs a lightweight Go receiving service
+with a browser-based administration panel.
 
-**Status: development prototype; not deployed.** The local Go and Qt builds are
-implemented. The TrueNAS/Tailscale application stack still requires a staging
-deployment and end-to-end validation before production use.
+**Status:** Deployed and in active use. MediaBridge supports real-world uploads
+and resumable transfers, but is still under active development. It is a
+self-hosted project, not a turnkey commercial file-transfer service.
 
-## Intended environment
+## Features
 
-- Desktop: Chelonia, openSUSE Tumbleweed, Qt 6 Widgets, native application.
-- Server: TrueNAS SCALE 25.10.4, Custom App with Tailscale and MediaBridge.
-- Storage: `/mnt/tank/data/media`, mounted as `/media` in the receiver.
-- Media permissions: UID 33, GID 568 (`apps`), preserving the existing POSIX
-  ACL design. Existing Jellyfin and FileBrowser Apps remain unchanged.
-- Management: an Access-protected hostname through the ZBook Cloudflare Tunnel,
-  then the TrueNAS LAN IP on port 30079.
-- Data: Chelonia's existing Tailscale connection directly to the new
-  `media-ingest` Tailnet node on TCP port 8081. No Cloudflare or SSH transfer.
+- **Native Qt 6 desktop application:** select a directory, monitor progress,
+  pause or resume transfers, and use the system's widget theme and palette.
+- **Live statistics:** transfer speed in MiB/s, active elapsed time and
+  estimated time remaining (ETA).
+- **Configurable parallelism:** 1–8 simultaneous 4 MiB chunks per file;
+  defaults to four. Multiple approved desktops may upload independently.
+- **Resumable uploads:** server-side chunk tracking survives interruptions and
+  restarts. Transient network errors are retried automatically.
+- **File integrity:** SHA-256 verification before completed files appear at
+  their destination.
+- **No destructive synchronization:** existing destination files are skipped,
+  not overwritten; clients cannot delete remote files.
+- **Private data path:** uploads run through Tailscale, not through the
+  administration website, Cloudflare Tunnel or SSH.
+- **Simple device approval:** each desktop requests access once; an
+  administrator approves or revokes it through the WebUI.
 
-## Authentication
+The desktop is currently built and tested on Linux with Qt 6. Other operating
+systems are not an explicit project target.
 
-There are **no MediaBridge usernames or passwords**.
+## Architecture
 
-1. Desktop generates an independent cryptographically random 128-bit device
-   identifier and 256-bit bearer credential, saved in its local user-only
-   configuration file (`~/.config/Evalisk/MediaBridge/identity.json`, exact
-   location follows Qt's `AppConfigLocation`).
-2. Desktop submits a pairing request to the private receiver endpoint.
-3. WebUI shows the pending device name and identifier. An administrator clicks
-   **Approve**. The device can upload until revoked.
-4. WebUI can **Revoke** an approved Desktop, immediately denying subsequent
-   uploads. Revoked devices must generate new credentials and request approval.
-5. Multiple Desktop devices can be approved independently.
+```text
+Desktop (Qt 6) -- Tailscale --> MediaBridge Receiver (Go) --> storage dataset
+                                       |
+                        device approval and upload state
 
-The server stores **SHA-256 hashes of credentials**, never plaintext bearer
-credentials. Tailscale encrypts the transport. Limit access to receiver TCP 8081
-with Tailnet ACL/grants. Local credentials are not a substitute for securing the
-desktop machine itself.
-
-### WebUI trust boundary
-
-The administrative WebUI has **no application-level login**. Cloudflare Access
-must enforce authentication **before** traffic can reach the origin. The
-server also checks the immediate peer IP against `MB_ADMIN_ALLOWED_CIDRS`, by
-default allowing only loopback. Supply the expected ZBook proxy address in
-the production Compose configuration.
-Never publish port 8080 on the internet, enable Cloudflare bypass policies,
-or expose it directly to untrusted LAN clients. The source-IP restriction must
-be tested behind the actual Docker port publishing path; Docker NAT may affect
-the source address seen by the application.
-
-The WebUI is strictly for connecting/re-authenticating/logging out the Tailscale
-node, viewing basic health, and approving/revoking Desktop devices. It cannot
-browse, upload, download or delete media. **All WebUI elements use 0px corners.**
-
-## Upload semantics
-
-- Recursive directory transfer preserves the selected top-level folder name.
-- Parallel range upload using 4 MiB chunks (1–8 concurrent requests per file,
-  configured in the Desktop window; default 4).
-- The Desktop forces a direct network connection, bypassing HTTP proxy settings
-  so Tailnet transfers are not accidentally routed through local Clash/Mihomo.
-- Transient HTTP 502/503/504, timeouts and disconnects are automatically
-  retried using bounded exponential backoff; individual chunks are idempotent.
-- Durable server-side chunk bitmap allows out-of-order uploads and resume
-  after client/server restart, including migration of existing V1 partial files.
-- SHA-256 verification before the file becomes visible at its final path.
-- Atomic no-overwrite publication using a hard link on the same ZFS dataset.
-- The hidden `.mediabridge-staging` directory contains a `.ignore` marker for
-  Jellyfin; verify scanner behavior before deployment.
-- No remote deletion or automatic replacement of existing media files.
-- Existing targets are skipped by the Desktop with an explicit log entry; this
-  **does not prove** the remote file is identical.
-- `status.json` and the existing TrueNAS apps are not modified.
-
-## Local build
-
-Build the Go server:
-
-```sh
-go test ./...
-go build -o build/mediabridge-server ./server
+Browser -- protected management proxy --> MediaBridge WebUI
+                                       |
+                         Tailscale enrollment and approvals
 ```
 
-Build the Chelonia Qt desktop:
+The receiver and WebUI are separate HTTP listeners. The receiver is reachable
+through a private Tailscale TCP forwarding rule; its HTTP port should not be
+published directly on a public or untrusted network.
+
+The WebUI is a **management interface only**. It manages Tailscale login and
+logout, reports service status, and approves or revokes desktop devices.
+It does not upload, browse, download or delete files. Its visual design uses
+square corners throughout (`border-radius: 0`).
+
+## Desktop workflow
+
+1. Install and sign in to Tailscale on the desktop.
+2. Open MediaBridge Desktop and enter the receiver's Tailnet address, such as
+   `http://<tailnet-ip>:8081` (or an equivalent MagicDNS name).
+3. Click **Request access**.
+4. Open the protected management WebUI and click **Approve** for the pending
+   desktop. Each desktop is approved independently; access remains valid until
+   revoked.
+5. Select a folder, choose a parallel-chunk count and click **Start upload**.
+
+The selected directory name and its subdirectories are preserved at the
+destination. Repeating an interrupted upload reuses matching server-side
+progress. Existing completed files are skipped, **without verifying that their
+contents match the local copy**.
+
+The desktop bypasses system HTTP proxy settings for direct Tailnet requests.
+Its speed display uses a rolling window of newly acknowledged payload bytes;
+previously uploaded chunks do not inflate the reported rate. Elapsed time
+excludes manual pauses. ETA is an estimate based on recent throughput and may
+fluctuate as the network changes.
+
+## Device authorization
+
+MediaBridge does not require a separate username or password on each desktop.
+
+Each desktop generates a random device identifier and bearer credential on
+first pairing. The credential is kept in a user-only local configuration file;
+the server stores only its SHA-256 hash. A new request initially has
+`pending` status and cannot upload until an administrator approves it.
+
+The WebUI supports multiple approved devices. Revoking a device denies future
+upload requests. The revoked desktop must request access again with a new
+device identity.
+
+**Important:** The management WebUI deliberately has **no built-in login
+form**. Protect it upstream with an authenticated access gateway, such as
+Cloudflare Access, and restrict access to its origin. The server also supports
+an immediate-peer IP allowlist through `MB_ADMIN_ALLOWED_CIDRS`. Verify how
+the reverse proxy and container networking affect the observed source IP.
+Never expose an unauthenticated management endpoint directly to the internet.
+Use Tailnet ACLs/grants to limit access to the receiver as an additional layer.
+
+## Building from source
+
+Requirements:
+
+- C++20, CMake 3.20+ and Qt 6 (Core, Widgets, Network, Concurrent) for Desktop
+- Go 1.26+ for Server
+- Tailscale for the private transport
+
+Build the native desktop:
 
 ```sh
 cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=Release
@@ -92,55 +111,77 @@ cmake --build build/desktop --parallel
 ./build/desktop/mediabridge-desktop
 ```
 
-The server has separate management (default `:8080`) and receiver (default
-`:8081`) HTTP listeners. Do not use the development defaults on an untrusted
-network. The receiver is intended for traffic encrypted by Tailscale.
+Build and test the Go receiver:
 
-## TrueNAS deployment (not yet performed)
+```sh
+go test ./...
+mkdir -p build
+go build -o build/mediabridge-server ./server
+```
 
-1. Prepare dedicated persistent application paths under
-   `/mnt/tank/apps/mediabridge/` through TrueNAS-supported mechanisms.
-2. Build and publish the server image from `server/Dockerfile`; replace the
-   image placeholder in `deploy/truenas-compose.example.yaml`.
-3. Install as a TrueNAS Custom App using the Compose template. The separate
-   Tailscale container runs `tailscaled` directly, so the management service
-   stays available throughout interactive login. When logged in, the receiver
-   configures private Tailscale Serve raw-TCP forwarding to `mediabridge:8081`.
-   Verify kernel TUN support, socket permission, login/logout and forwarding.
-4. Make `mbridge.evalisk.org` an Access-protected Cloudflare Tunnel hostname
-   routed by ZBook to `http://192.168.88.11:30079`.
-5. Verify the management-source CIDR allowlist and deny access from other LAN
-   hosts; do not publish the receiver TCP 8081 on TrueNAS LAN.
-6. Approve the Chelonia Desktop in the WebUI and test a noncritical small file
-   before any multi-gigabyte media transfers.
-7. Confirm Jellyfin can read new files and that partial files are not scanned.
+The desktop uses the system Qt style, fonts and palette rather than replacing
+them with an application-wide stylesheet.
 
-The example runs MediaBridge as container UID 0 with GID 568 so that it can
-operate the root-owned Tailscale LocalAPI and assign correct UID/GID to newly
-created media files. Only the media and dedicated application state directories
-are mounted, and the container drops all capabilities except `CHOWN`. This
-trade-off should be revisited before treating the app as production-hardened.
+## Self-hosting the server
 
-## Current limitations
+A [TrueNAS SCALE](https://www.truenas.com/truenas-scale/) Custom App Compose
+example is provided in
+[`deploy/truenas-compose.example.yaml`](deploy/truenas-compose.example.yaml).
+The server image is built through GitHub Actions and published as
+`ghcr.io/nuaptanevalisk/mediabridge-server`.
 
-- The Desktop processes files sequentially, but chunks within each file can
-  transfer concurrently. Different Desktop clients can upload simultaneously.
-- Pausing happens after the current chunk.
-- Network interruptions retry automatically without user action. Restarting
-  the Desktop and selecting the same directory reuses existing V1/V2 partial
-  data. Already finished destinations are skipped, not overwritten.
-- The Desktop respects the KDE/Qt-native widget style, palette and fonts:
-  no application-wide stylesheet is installed.
-- The Desktop displays rolling acknowledged-payload throughput (MiB/s), active
-  elapsed time (excluding pauses), and a remaining-time estimate based on the
-  last approximately ten seconds of throughput. Previously uploaded chunks
-  and skipped existing files do not count as new transferred bytes. ETA shows
-  a status instead of an estimate while paused, verifying or finalizing.
-- No server-side per-device quota or request rate limiter yet.
-- No automatic conflict resolution, file deletion, or directory browsing.
-- No automated server image publication, Tailnet enrollment, or Cloudflare
-  provisioning. None of the infrastructure changes have been applied.
+The example includes two containers:
+
+- **Tailscale sidecar:** a persistent node that can be enrolled through the
+  WebUI. Running `tailscaled` directly keeps management available before
+  the initial Tailnet login.
+- **MediaBridge receiver:** a Go service that maintains approval records and
+  receives data in a writable mounted directory. Once Tailscale is running,
+  it configures private TCP forwarding to the receiver.
+
+To adapt the example:
+
+1. Create persistent storage for the Tailscale node state and MediaBridge
+   server state.
+2. Set the host-path mount for the destination dataset, and verify file
+   ownership, group membership and inherited ACLs for your media services.
+   The current image and template contain deployment-specific UID/GID
+   assumptions; review them before using a different dataset.
+3. Configure a dedicated management origin reachable from your authenticated
+   reverse proxy. Update the source-IP allowlist for that proxy and confirm
+   that direct, unauthorized access to the management endpoint is denied.
+4. Deploy the Custom App through TrueNAS-supported management mechanisms.
+   Verify `/dev/net/tun`, Tailscale state persistence and the shared LocalAPI
+   socket.
+5. Enroll the Tailscale node from the WebUI. Ensure the receiver's data port
+   is accessible only to the intended Tailnet clients.
+6. Approve a desktop and test with a small, noncritical file. Check that the
+   destination service can read it and that incomplete staging files are
+   excluded from any media-library scans.
+
+The server defaults to management port `8080` and receiver port `8081`
+inside the application. Container host port mappings, IP addresses, paths and
+hostnames are **deployment-specific**. The example Compose file is a template
+and must be reviewed before use.
+
+## Transfer behavior and limitations
+
+- The current desktop processes files sequentially, but uploads chunks of an
+  individual file in parallel. Different desktops can transfer concurrently.
+- Manual pause stops scheduling new requests; in-flight requests may finish.
+- The receiver tracks completed chunks and supports restarting transfers from
+  persistent staging files, including compatible older upload sessions.
+- Integrity is checked before publishing a completed file. A destination with
+  the same path is never automatically replaced.
+- There is no remote file browser, deletion operation, two-way sync, conflict
+  resolution, per-device quota or server-side request rate limiter.
+- The current server uses a fixed allowed browser Origin for management POST
+  requests. A different management hostname requires updating that check in
+  the server source and rebuilding the image.
+- Some deployment settings are intentionally specialized for TrueNAS and may
+  require adaptation for other storage systems.
 
 ## License
 
-GNU General Public License version 3 only. See [LICENSE](LICENSE).
+MediaBridge is licensed under the **GNU General Public License, version 3
+only**. See [LICENSE](LICENSE).
