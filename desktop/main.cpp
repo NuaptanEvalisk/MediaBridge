@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include <QApplication>
-#include <QCheckBox>
+#include <QBitArray>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFormLayout>
 #include <QFutureWatcher>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -18,17 +18,21 @@
 #include <QMainWindow>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
+#include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRandomGenerator>
+#include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
+#include <QSpinBox>
 #include <QStandardPaths>
 #include <QSysInfo>
-#include <QRegularExpression>
 #include <QTextEdit>
 #include <QTimer>
+#include <QUrl>
 #include <QtConcurrent>
 #include <QVBoxLayout>
 #include <functional>
@@ -53,249 +57,478 @@ static QByteArray randomHex(int bytes) {
 class MainWindow final : public QMainWindow {
 public:
     MainWindow() {
-        setWindowTitle("MediaBridge — Chelonia"); resize(760, 580);
+        setWindowTitle("MediaBridge — Chelonia");
+        resize(790, 540);
         auto *root = new QWidget;
-        auto *v = new QVBoxLayout(root); v->setSpacing(12);
-        auto *heading = new QLabel("MEDIABRIDGE / DESKTOP");
-        heading->setObjectName("heading"); v->addWidget(heading);
+        auto *v = new QVBoxLayout(root);
 
-        auto *connectBox = new QGroupBox("SERVER / DEVICE APPROVAL");
-        auto *c = new QVBoxLayout(connectBox);
-        auto *addressRow = new QHBoxLayout;
+        auto *heading = new QLabel("MediaBridge / Desktop");
+        QFont titleFont = heading->font();
+        titleFont.setBold(true);
+        titleFont.setPointSize(titleFont.pointSize() + 3);
+        heading->setFont(titleFont);
+        v->addWidget(heading);
+
+        auto *serverBox = new QGroupBox("Server / Device approval");
+        auto *serverLayout = new QVBoxLayout(serverBox);
+        auto *serverRow = new QHBoxLayout;
         address = new QLineEdit("http://media-ingest:8081");
         address->setPlaceholderText("http://100.x.y.z:8081");
-        addressRow->addWidget(new QLabel("Tailnet address")); addressRow->addWidget(address, 1);
-        c->addLayout(addressRow);
+        serverRow->addWidget(new QLabel("Tailnet address"));
+        serverRow->addWidget(address, 1);
+        serverLayout->addLayout(serverRow);
         auto *pairRow = new QHBoxLayout;
         approval = new QLabel("Not connected");
-        requestButton = new QPushButton("REQUEST ACCESS");
-        pairRow->addWidget(approval,1); pairRow->addWidget(requestButton);
-        c->addLayout(pairRow);v->addWidget(connectBox);
+        requestButton = new QPushButton("Request access");
+        pairRow->addWidget(approval, 1);
+        pairRow->addWidget(requestButton);
+        serverLayout->addLayout(pairRow);
+        v->addWidget(serverBox);
 
-        auto *uploadBox = new QGroupBox("DIRECTORY UPLOAD");
-        auto *u = new QVBoxLayout(uploadBox);
+        auto *uploadBox = new QGroupBox("Directory upload");
+        auto *uploadLayout = new QVBoxLayout(uploadBox);
         auto *folderRow = new QHBoxLayout;
-        directory = new QLineEdit; directory->setReadOnly(true);
-        chooseButton = new QPushButton("SELECT FOLDER");
-        folderRow->addWidget(directory,1);folderRow->addWidget(chooseButton);
-        u->addLayout(folderRow);
-        summary = new QLabel("Choose a directory. Its name and subfolders will be preserved under /media.");
-        summary->setWordWrap(true);u->addWidget(summary);
-        current = new QLabel("Idle"); current->setWordWrap(true);u->addWidget(current);
-        bar = new QProgressBar;bar->setRange(0,1000);bar->setValue(0);u->addWidget(bar);
-        auto *buttons = new QHBoxLayout;
-        startButton = new QPushButton("START UPLOAD");
-        pauseButton = new QPushButton("PAUSE");
-        buttons->addWidget(startButton);buttons->addWidget(pauseButton);buttons->addStretch();
-        u->addLayout(buttons);v->addWidget(uploadBox);
+        directory = new QLineEdit;
+        directory->setReadOnly(true);
+        chooseButton = new QPushButton("Select folder");
+        folderRow->addWidget(directory, 1);
+        folderRow->addWidget(chooseButton);
+        uploadLayout->addLayout(folderRow);
+        auto *optionsRow = new QHBoxLayout;
+        optionsRow->addWidget(new QLabel("Parallel chunks"));
+        parallelism = new QSpinBox;
+        parallelism->setRange(1, 8);
+        parallelism->setToolTip("Concurrent 4 MiB chunk requests for a single file.");
+        optionsRow->addWidget(parallelism);
+        optionsRow->addStretch();
+        uploadLayout->addLayout(optionsRow);
+        summary = new QLabel("Choose a folder to upload it, including its subdirectories.");
+        summary->setWordWrap(true);
+        uploadLayout->addWidget(summary);
+        current = new QLabel("Idle");
+        current->setWordWrap(true);
+        uploadLayout->addWidget(current);
+        bar = new QProgressBar;
+        bar->setRange(0, 1000);
+        bar->setValue(0);
+        uploadLayout->addWidget(bar);
+        auto *buttonRow = new QHBoxLayout;
+        startButton = new QPushButton("Start upload");
+        pauseButton = new QPushButton("Pause");
+        buttonRow->addWidget(startButton);
+        buttonRow->addWidget(pauseButton);
+        buttonRow->addStretch();
+        uploadLayout->addLayout(buttonRow);
+        v->addWidget(uploadBox);
 
-        logView = new QTextEdit;logView->setReadOnly(true);logView->setPlaceholderText("Transfer log");v->addWidget(logView,1);
+        logView = new QTextEdit;
+        logView->setReadOnly(true);
+        logView->setPlaceholderText("Transfer log");
+        v->addWidget(logView, 1);
         setCentralWidget(root);
-        setStyleSheet(R"CSS(
-            * { border-radius:0px; font-family:Sans Serif; }
-            QWidget { background:#f7f7f5; color:#171b1f; }
-            QLabel#heading { font-size:19px; font-weight:700; padding:8px 0; }
-            QGroupBox { border:1px solid #b4b7b8; margin-top:13px; padding:14px 8px 8px; font-weight:600; }
-            QGroupBox::title { subcontrol-origin:margin; subcontrol-position:top left; padding:0 6px; }
-            QPushButton { background:#17212b; color:white; border:1px solid #17212b; padding:9px 14px; font-weight:600; }
-            QPushButton:disabled { background:#b7b7b7; border-color:#b7b7b7; }
-            QPushButton:hover:!disabled { background:#39485a; }
-            QLineEdit, QTextEdit { background:white; border:1px solid #b8bdc2; padding:8px; }
-            QProgressBar { background:#e3e3e3; border:1px solid #b8bdc2; text-align:center; height:22px; }
-            QProgressBar::chunk { background:#177e75; }
-        )CSS");
 
+        // Deliberately do not set an application-wide stylesheet or style.
+        // Use the platform-selected KDE/Fusion QStyle, palette and fonts.
+        manager.setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
+        controlTimer = new QTimer(this);
+        controlTimer->setSingleShot(true);
+        connect(controlTimer, &QTimer::timeout, this, [this] {
+            if (!busy || paused || controlPending) return;
+            if (phase == Phase::Starting) startNext();
+            else if (phase == Phase::Finalizing) finalize();
+        });
         loadIdentity();
-        connect(requestButton,&QPushButton::clicked,this,[this]{ requestPairing(); });
-        connect(chooseButton,&QPushButton::clicked,this,[this]{ selectDirectory(); });
-        connect(startButton,&QPushButton::clicked,this,[this]{ startUpload(); });
-        connect(pauseButton,&QPushButton::clicked,this,[this]{togglePause();});
-        auto *timer = new QTimer(this);timer->setInterval(5000);
-        connect(timer,&QTimer::timeout,this,[this]{ if(!id.isEmpty())pollApproval(); });timer->start();
+        connect(requestButton, &QPushButton::clicked, this, [this]{ requestPairing(); });
+        connect(chooseButton, &QPushButton::clicked, this, [this]{ selectDirectory(); });
+        connect(startButton, &QPushButton::clicked, this, [this]{ startUpload(); });
+        connect(pauseButton, &QPushButton::clicked, this, [this]{ togglePause(); });
+        connect(parallelism, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, [this](int){ if (!id.isEmpty()) saveIdentity(); });
+        auto *timer = new QTimer(this);
+        timer->setInterval(5000);
+        connect(timer, &QTimer::timeout, this, [this]{ if (!id.isEmpty()) pollApproval(); });
+        timer->start();
         refreshControls();
-        if (!id.isEmpty()) QTimer::singleShot(300,this,[this]{pollApproval();});
+        if (!id.isEmpty()) QTimer::singleShot(300, this, [this]{ pollApproval(); });
     }
 
 private:
+    enum class Phase { Idle, Starting, Transferring, Hashing, Finalizing };
+    using Done = std::function<void(int, QJsonObject, QString)>;
+    static constexpr qint64 defaultChunkSize = 4LL * 1024 * 1024;
+
     QNetworkAccessManager manager;
     QLineEdit *address = nullptr, *directory = nullptr;
     QLabel *approval = nullptr, *summary = nullptr, *current = nullptr;
     QPushButton *requestButton = nullptr, *chooseButton = nullptr, *startButton = nullptr, *pauseButton = nullptr;
+    QSpinBox *parallelism = nullptr;
     QProgressBar *bar = nullptr;
     QTextEdit *logView = nullptr;
+    QTimer *controlTimer = nullptr;
     QString id, token, pairedServer;
-    bool revoked = false;
-    bool approved = false, busy = false, paused = false;
+    bool revoked = false, approved = false, busy = false, paused = false;
+    Phase phase = Phase::Idle;
     QVector<FileEntry> queue;
-    int index = 0;
-    qint64 totalBytes = 0, doneBytes = 0, offset = 0;
+    int fileIndex = 0, controlRetry = 0;
+    bool controlPending = false;
+    qint64 totalBytes = 0, doneBytes = 0, confirmedBytes = 0, chunkSize = defaultChunkSize;
     QString uploadId;
-    const qint64 chunkSize = 4LL*1024*1024;
+    QBitArray doneChunks;
+    QSet<int> activeChunks, retryWaiting;
+    QHash<int, int> attempts;
 
     QString configPath() const {
-        return QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)+"/identity.json";
+        return QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/identity.json";
     }
     void loadIdentity() {
-        QFile f(configPath());if(!f.open(QIODevice::ReadOnly))return;
-        QJsonObject o=QJsonDocument::fromJson(f.readAll()).object();
-        id=o.value("id").toString(); token=o.value("token").toString();
-        pairedServer=o.value("server").toString();
-        if(!pairedServer.isEmpty())address->setText(pairedServer);
+        parallelism->setValue(4);
+        QFile file(configPath());
+        if (!file.open(QIODevice::ReadOnly)) return;
+        const auto config = QJsonDocument::fromJson(file.readAll()).object();
+        id = config.value("id").toString();
+        token = config.value("token").toString();
+        pairedServer = config.value("server").toString();
+        parallelism->setValue(qBound(1, config.value("parallelism").toInt(4), 8));
+        if (!pairedServer.isEmpty()) address->setText(pairedServer);
     }
-    bool saveIdentity(){
-        QString dir=QFileInfo(configPath()).absolutePath();
-        if(!QDir().mkpath(dir))return false;
-        QSaveFile f(configPath());
-        if(!f.open(QIODevice::WriteOnly))return false;
-        const QJsonObject o{{"id",id},{"token",token},{"server",pairedServer}};
-        if(f.write(QJsonDocument(o).toJson())<0||!f.commit())return false;
-        return QFile::setPermissions(configPath(),QFileDevice::ReadOwner|QFileDevice::WriteOwner);
+    bool saveIdentity() {
+        if (!QDir().mkpath(QFileInfo(configPath()).absolutePath())) return false;
+        QSaveFile file(configPath());
+        if (!file.open(QIODevice::WriteOnly)) return false;
+        QJsonObject config{{"id", id}, {"token", token},
+                           {"server", pairedServer}, {"parallelism", parallelism->value()}};
+        if (file.write(QJsonDocument(config).toJson()) < 0 || !file.commit()) return false;
+        return QFile::setPermissions(configPath(), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     }
-    QString base()const{return address->text().trimmed().remove(QRegularExpression("/+$"));}
-    using Done = std::function<void(int,QJsonObject,QString)>;
-    void send(const QByteArray &method,const QString &path,const QByteArray &body,const Done &done, bool authorized=true){
-        auto url=QUrl(base()+path);
-        QNetworkRequest req(url);req.setTransferTimeout(60000);
-        if(authorized){req.setRawHeader("X-MediaBridge-Device",id.toUtf8());req.setRawHeader("Authorization","Bearer "+token.toUtf8());}
-        QNetworkReply *reply;
-        if(method=="GET") reply=manager.get(req);
-        else {
-            req.setHeader(QNetworkRequest::ContentTypeHeader,method=="PUT"?"application/octet-stream":"application/json");
-            reply=manager.sendCustomRequest(req,method,body);
+    QString base() const {
+        return address->text().trimmed().remove(QRegularExpression("/+$"));
+    }
+    void send(const QByteArray &method, const QString &path, const QByteArray &body,
+              const Done &done, bool authorized = true) {
+        QNetworkRequest req(QUrl(base() + path));
+        req.setTransferTimeout(90000);
+        if (authorized) {
+            req.setRawHeader("X-MediaBridge-Device", id.toUtf8());
+            req.setRawHeader("Authorization", "Bearer " + token.toUtf8());
         }
-        connect(reply,&QNetworkReply::finished,this,[reply,done]{
-            int code=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-            const QJsonObject result=QJsonDocument::fromJson(reply->readAll()).object();
-            QString err=reply->error()==QNetworkReply::NoError ? QString() : reply->errorString();
-            if(code>=400)err=result.value("error").toString(err);
-            done(code,result,err);reply->deleteLater();
+        QNetworkReply *reply = nullptr;
+        if (method == "GET") {
+            reply = manager.get(req);
+        } else {
+            req.setHeader(QNetworkRequest::ContentTypeHeader,
+                          method == "PUT" ? "application/octet-stream" : "application/json");
+            reply = manager.sendCustomRequest(req, method, body);
+        }
+        connect(reply, &QNetworkReply::finished, this, [reply, done] {
+            const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const QJsonObject response = QJsonDocument::fromJson(reply->readAll()).object();
+            QString error = reply->error() == QNetworkReply::NoError ? QString() : reply->errorString();
+            if (code >= 400) error = response.value("error").toString(error);
+            done(code, response, error);
+            reply->deleteLater();
         });
     }
-    void note(const QString &msg){logView->append(QDateTime::currentDateTime().toString("hh:mm:ss")+"  "+msg);}
-    void refreshControls(){startButton->setEnabled(approved&&!busy&&!directory->text().isEmpty());pauseButton->setEnabled(busy);pauseButton->setText(paused?"RESUME":"PAUSE");requestButton->setEnabled(!busy);address->setReadOnly(busy);}
-    void requestPairing(){
-        const QUrl server(base());
-        if(!server.isValid()||server.scheme()!="http"||server.host().isEmpty()){
-            QMessageBox::warning(this,"Server address","Enter a Tailnet HTTP URL, e.g. http://media-ingest:8081");return;
-        }
-        if(pairedServer!=base()||id.isEmpty()||token.isEmpty()||revoked){
-            id=QString::fromUtf8(randomHex(16));token=QString::fromUtf8(randomHex(32));pairedServer=base();approved=false;
-            revoked=false;
-            if(!saveIdentity()){note("Cannot save device identity securely");return;}
-        }
-        QJsonObject body{{"id",id},{"token",token},{"name",QSysInfo::machineHostName()}};
-        send("POST","/api/v1/pair",QJsonDocument(body).toJson(),[this](int code,QJsonObject result,QString err){
-            if(code<200||code>=300){note("Pairing request failed: "+err);return;}
-            auto state=result.value("state").toString();approved=state=="approved";
-            approval->setText(approved?"APPROVED": "PENDING WEBUI APPROVAL");
-            note("Device request: "+state);refreshControls();
-        },false);
+    void note(const QString &msg) {
+        logView->append(QDateTime::currentDateTime().toString("hh:mm:ss") + "  " + msg.toHtmlEscaped());
     }
-    void pollApproval(){
-        if(base()!=pairedServer||id.isEmpty())return;
-        send("GET","/api/v1/pair/status",{},[this](int code,QJsonObject result,QString){
-            if(code!=200){approved=false;approval->setText("DISCONNECTED / UNKNOWN DEVICE");}
-            else {
-                auto state=result.value("state").toString();
-                bool wasApproved=approved;approved=(state=="approved");revoked=(state=="revoked");
-                approval->setText(state.toUpper());
-                if(wasApproved&&!approved){paused=true;note("Device access revoked; upload paused");}
+    void refreshControls() {
+        startButton->setEnabled(approved && !busy && !directory->text().isEmpty());
+        pauseButton->setEnabled(busy);
+        pauseButton->setText(paused ? "Resume" : "Pause");
+        requestButton->setEnabled(!busy);
+        address->setReadOnly(busy);
+        chooseButton->setEnabled(!busy);
+        parallelism->setEnabled(!busy);
+    }
+    void requestPairing() {
+        const QUrl server(base());
+        if (!server.isValid() || server.scheme() != "http" || server.host().isEmpty()) {
+            QMessageBox::warning(this, "Server address", "Enter a Tailnet URL such as http://media-ingest:8081.");
+            return;
+        }
+        if (pairedServer != base() || id.isEmpty() || token.isEmpty() || revoked) {
+            id = QString::fromUtf8(randomHex(16));
+            token = QString::fromUtf8(randomHex(32));
+            pairedServer = base();
+            approved = revoked = false;
+            if (!saveIdentity()) { note("Cannot save device identity"); return; }
+        }
+        QJsonObject body{{"id", id}, {"token", token}, {"name", QSysInfo::machineHostName()}};
+        send("POST", "/api/v1/pair", QJsonDocument(body).toJson(),
+             [this](int code, QJsonObject result, QString err) {
+            if (code < 200 || code >= 300) { note("Pairing request failed: " + err); return; }
+            const QString state = result.value("state").toString();
+            approved = state == "approved";
+            approval->setText(state.toUpper());
+            note("Device request: " + state);
+            refreshControls();
+        }, false);
+    }
+    void pollApproval() {
+        if (base() != pairedServer || id.isEmpty()) return;
+        send("GET", "/api/v1/pair/status", {}, [this](int code, QJsonObject result, QString) {
+            if (code != 200) {
+                // A transient network outage does not revoke persistent approval.
+                approval->setText("Offline / checking...");
+                return;
+            }
+            const QString state = result.value("state").toString();
+            const bool wasApproved = approved;
+            approved = state == "approved";
+            revoked = state == "revoked";
+            approval->setText(state.toUpper());
+            if (wasApproved && !approved) {
+                paused = true;
+                note("Access revoked; uploads paused");
             }
             refreshControls();
         });
     }
-    void selectDirectory(){
-        const QString path=QFileDialog::getExistingDirectory(this,"Choose a directory to upload",QDir::homePath());
-        if(path.isEmpty())return;
-        directory->setText(path);refreshControls();
-        summary->setText("Directory: "+QFileInfo(path).fileName()+" — subfolders will be preserved.");
+    void selectDirectory() {
+        const QString path = QFileDialog::getExistingDirectory(this, "Choose directory to upload", QDir::homePath());
+        if (path.isEmpty()) return;
+        directory->setText(path);
+        summary->setText("Directory: " + QFileInfo(path).fileName() + " — subfolders will be preserved.");
+        refreshControls();
     }
-    bool scan(){
-        queue.clear();totalBytes=0;doneBytes=0;
-        const QString root=directory->text();
-        const QString prefix=QFileInfo(root).fileName()+"/";
-        QDirIterator it(root,QDir::Files|QDir::NoSymLinks|QDir::NoDotAndDotDot,QDirIterator::Subdirectories);
-        while(it.hasNext()){
-            const QString absolute=it.next();QFileInfo fi(absolute);
-            QString rel=prefix+QDir(root).relativeFilePath(absolute).replace('\\','/');
-            if(rel.split('/').contains("..")||rel.contains(".mediabridge-"))continue;
-            queue.push_back({absolute,rel,fi.size(),fi.lastModified().toMSecsSinceEpoch()});
-            totalBytes+=fi.size();
+    bool scan() {
+        queue.clear();
+        totalBytes = doneBytes = 0;
+        const QString root = directory->text();
+        const QString prefix = QFileInfo(root).fileName() + "/";
+        QDirIterator it(root, QDir::Files | QDir::NoSymLinks | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString absolute = it.next();
+            QFileInfo info(absolute);
+            QString relative = prefix + QDir(root).relativeFilePath(absolute).replace('\\', '/');
+            if (relative.split('/').contains("..") || relative.contains(".mediabridge-")) continue;
+            queue.push_back({absolute, relative, info.size(), info.lastModified().toMSecsSinceEpoch()});
+            totalBytes += info.size();
         }
         return !queue.isEmpty();
     }
-    void startUpload(){
-        if(!approved)return;
-        if(!scan()){QMessageBox::information(this,"No files","The selected directory has no regular files.");return;}
-        index=0;busy=true;paused=false;note(QString("Starting %1 files (%2 MB)").arg(queue.size()).arg(totalBytes/1e6,0,'f',1));
-        refreshControls();startNext();
-    }
-    void togglePause(){paused=!paused;note(paused?"Pausing after current chunk":"Resuming");refreshControls();if(!paused)sendChunk();}
-    void updateProgress(){
-        bar->setValue(totalBytes>0?int(1000.0*double(doneBytes+offset)/double(totalBytes)):1000);
-        if(index<queue.size())current->setText(QString("%1 / %2 — %3 (%4 MB / %5 MB)")
-            .arg(index+1).arg(queue.size()).arg(queue[index].relative)
-            .arg(double(doneBytes+offset)/1e6,0,'f',1).arg(double(totalBytes)/1e6,0,'f',1));
-    }
-    void startNext(){
-        if(paused)return;
-        if(index>=queue.size()){
-            busy=false;current->setText("Completed");bar->setValue(1000);note("All files uploaded");refreshControls();return;
+    void startUpload() {
+        if (!approved) return;
+        if (!scan()) {
+            QMessageBox::information(this, "No files", "The selected directory has no regular files.");
+            return;
         }
-        const auto &f=queue[index];
-        QJsonObject body{{"path",f.relative},{"size",double(f.size)},{"mod_time",double(f.modified)}};
-        send("POST","/api/v1/uploads",QJsonDocument(body).toJson(),[this](int code,QJsonObject result,QString err){
-            if(code==409){note("Skipped existing destination: "+queue[index].relative);doneBytes+=queue[index].size;++index;startNext();return;}
-            if(code<200||code>=300){stopped("Cannot begin upload: "+err);return;}
-            uploadId=result.value("id").toString();offset=qint64(result.value("offset").toDouble());
-            if(offset<0||offset>queue[index].size){stopped("Server returned invalid resume offset");return;}
-            updateProgress();sendChunk();
+        fileIndex = 0;
+        busy = true;
+        paused = false;
+        controlRetry = 0;
+        note(QString("Starting %1 files (%2 MB) with %3 parallel chunks")
+             .arg(queue.size()).arg(double(totalBytes)/1e6, 0, 'f', 1).arg(parallelism->value()));
+        refreshControls();
+        startNext();
+    }
+    void togglePause() {
+        paused = !paused;
+        note(paused ? "Paused (current requests may finish)" : "Resumed");
+        refreshControls();
+        if (paused) return;
+        if (phase == Phase::Starting) {controlTimer->stop();startNext();}
+        else if (phase == Phase::Finalizing) {controlTimer->stop();finalize();}
+        else if (phase == Phase::Transferring) {
+            const auto pending = retryWaiting.values();
+            retryWaiting.clear();
+            for (int i : pending) sendChunk(i);
+            scheduleChunks();
+        }
+    }
+    void updateProgress() {
+        const qint64 progressed = doneBytes + confirmedBytes;
+        bar->setValue(totalBytes > 0 ? int(1000.0 * double(progressed) / double(totalBytes)) : 1000);
+        if (fileIndex < queue.size()) {
+            current->setText(QString("%1 / %2 — %3  (%4 MB / %5 MB)")
+                .arg(fileIndex + 1).arg(queue.size()).arg(queue[fileIndex].relative)
+                .arg(double(progressed) / 1e6, 0, 'f', 1).arg(double(totalBytes) / 1e6, 0, 'f', 1));
+        }
+    }
+    static bool transient(int status) {
+        return status == 0 || status == 408 || status == 409 || status == 429 ||
+               status == 500 || status == 502 || status == 503 || status == 504;
+    }
+    static int retryDelay(int attempt) {
+        return qMin(30000, 1000 * (1 << qMin(attempt, 5)));
+    }
+    void retryControl(const QString &operation, int status, const QString &error) {
+        if (!transient(status)) { stopped(operation + ": " + error); return; }
+        const int delay = retryDelay(controlRetry++);
+        if (controlRetry == 1 || controlRetry % 5 == 0)
+            note(QString("%1: HTTP %2 (%3). Retrying automatically...")
+                 .arg(operation).arg(status).arg(error));
+        controlTimer->start(delay);
+    }
+    void startNext() {
+        if (!busy || paused || controlPending) return;
+        if (fileIndex >= queue.size()) {
+            busy = false; phase = Phase::Idle;
+            current->setText("Completed");
+            bar->setValue(1000);
+            note("All files uploaded");
+            refreshControls();
+            return;
+        }
+        phase = Phase::Starting;
+        controlPending = true;
+        const FileEntry entry = queue[fileIndex];
+        QJsonObject payload{{"path",entry.relative},{"size",double(entry.size)},{"mod_time",double(entry.modified)}};
+        send("POST", "/api/v2/uploads", QJsonDocument(payload).toJson(),
+             [this](int code, QJsonObject result, QString error) {
+            controlPending = false;
+            if (!busy || phase != Phase::Starting) return;
+            if (code == 409 && error.startsWith("destination exists")) {
+                note("Skipped existing destination: " + queue[fileIndex].relative);
+                doneBytes += queue[fileIndex].size;
+                ++fileIndex; controlRetry = 0;
+                updateProgress(); startNext();
+                return;
+            }
+            if (code < 200 || code >= 300) { retryControl("Start upload",code,error); return; }
+            controlRetry = 0;
+            uploadId = result.value("id").toString();
+            chunkSize = qint64(result.value("chunk_size").toDouble());
+            if (uploadId.isEmpty() || chunkSize != defaultChunkSize) {
+                stopped("Server returned unsupported parallel-upload parameters"); return;
+            }
+            const int count = int((queue[fileIndex].size + chunkSize - 1) / chunkSize);
+            const QByteArray bitmap = QByteArray::fromBase64(result.value("bitmap").toString().toLatin1());
+            if (bitmap.size() != (count + 7) / 8) { stopped("Invalid server resume bitmap"); return; }
+            doneChunks = QBitArray(count);
+            confirmedBytes = 0;
+            for (int i = 0; i < count; ++i) {
+                if ((quint8(bitmap.at(i/8)) & (1 << (i%8))) != 0) {
+                    doneChunks.setBit(i);
+                    confirmedBytes += qMin(chunkSize,queue[fileIndex].size - qint64(i)*chunkSize);
+                }
+            }
+            activeChunks.clear(); retryWaiting.clear(); attempts.clear();
+            phase = Phase::Transferring;
+            note(QString("Resuming %1: %2 / %3 MiB already present")
+                 .arg(queue[fileIndex].relative).arg(double(confirmedBytes)/1048576.0,0,'f',1)
+                 .arg(double(queue[fileIndex].size)/1048576.0,0,'f',1));
+            updateProgress();
+            scheduleChunks();
         });
     }
-    void sendChunk(){
-        if(paused||!busy||index>=queue.size())return;
-        const auto &entry=queue[index];
-        if(offset==entry.size){finalizeHash();return;}
+    void scheduleChunks() {
+        if (!busy || paused || phase != Phase::Transferring) return;
+        while (activeChunks.size() < parallelism->value()) {
+            int next = -1;
+            for (int i = 0; i < doneChunks.size(); ++i) {
+                if (!doneChunks.testBit(i) && !activeChunks.contains(i)) { next = i; break; }
+            }
+            if (next < 0) break;
+            activeChunks.insert(next);
+            sendChunk(next);
+        }
+        if (activeChunks.isEmpty() && confirmedBytes == queue[fileIndex].size) finalizeHash();
+    }
+    void sendChunk(int index) {
+        if (!busy || paused || phase != Phase::Transferring) {
+            retryWaiting.insert(index);
+            return;
+        }
+        retryWaiting.remove(index);
+        const auto &entry = queue[fileIndex];
+        const qint64 offset = qint64(index)*chunkSize;
         QFile file(entry.absolute);
-        if(!file.open(QIODevice::ReadOnly)||!file.seek(offset)){stopped("Cannot read local file: "+entry.absolute);return;}
-        const QByteArray chunk=file.read(qMin(chunkSize,entry.size-offset));
-        if(chunk.isEmpty()){stopped("Unexpected end of local file");return;}
-        const QString path=QString("/api/v1/uploads/%1/chunk?offset=%2").arg(uploadId).arg(offset);
-        send("PUT",path,chunk,[this](int code,QJsonObject result,QString err){
-            if(code<200||code>=300){stopped("Chunk failed (retry by Start Upload): "+err);return;}
-            offset=qint64(result.value("offset").toDouble());updateProgress();sendChunk();
-        });
-    }
-    void finalizeHash(){
-        if(index>=queue.size())return;
-        const QString filePath=queue[index].absolute;
-        note("Verifying SHA-256: "+queue[index].relative);
-        auto *watcher=new QFutureWatcher<QByteArray>(this);
-        connect(watcher,&QFutureWatcher<QByteArray>::finished,this,[this,watcher]{
-            const QByteArray hash=watcher->result();watcher->deleteLater();
-            if(hash.isEmpty()){stopped("Could not hash local file");return;}
-            QJsonObject body{{"sha256",QString::fromLatin1(hash.toHex())}};
-            send("POST",QString("/api/v1/uploads/%1/finalize").arg(uploadId),QJsonDocument(body).toJson(),[this](int code,QJsonObject,QString err){
-                if(code<200||code>=300){stopped("Finalization failed: "+err);return;}
-                note("Completed: "+queue[index].relative);doneBytes+=queue[index].size;offset=0;++index;
-                updateProgress();startNext();
+        if (!file.open(QIODevice::ReadOnly) || !file.seek(offset)) {
+            stopped("Cannot read local file: " + entry.absolute); return;
+        }
+        QByteArray bytes = file.read(qMin(chunkSize,entry.size-offset));
+        if (bytes.size() != qMin(chunkSize,entry.size-offset)) {
+            stopped("Local file changed during upload: " + entry.absolute); return;
+        }
+        const QString path = QString("/api/v2/uploads/%1/chunks/%2").arg(uploadId).arg(index);
+        send("PUT", path, bytes, [this,index](int code, QJsonObject, QString error) {
+            if (!busy || phase != Phase::Transferring) return;
+            if (code >= 200 && code < 300) {
+                if (!doneChunks.testBit(index)) {
+                    doneChunks.setBit(index);
+                    confirmedBytes += qMin(chunkSize, queue[fileIndex].size - qint64(index)*chunkSize);
+                }
+                activeChunks.remove(index);
+                retryWaiting.remove(index);
+                attempts.remove(index);
+                updateProgress();
+                scheduleChunks();
+                return;
+            }
+            if (!transient(code)) { stopped(QString("Chunk %1: %2").arg(index).arg(error)); return; }
+            const int attempt = ++attempts[index];
+            if (attempt == 1 || attempt % 5 == 0)
+                note(QString("Chunk %1: HTTP %2 (%3); retrying without losing progress")
+                     .arg(index).arg(code).arg(error));
+            QTimer::singleShot(retryDelay(attempt-1), this, [this,index] {
+                if (!busy || phase != Phase::Transferring || !activeChunks.contains(index)) return;
+                sendChunk(index);
             });
         });
+    }
+    void finalizeHash() {
+        if (!busy || phase != Phase::Transferring || fileIndex >= queue.size()) return;
+        phase = Phase::Hashing;
+        const QString filePath = queue[fileIndex].absolute;
+        note("Verifying SHA-256: " + queue[fileIndex].relative);
+        auto *watcher = new QFutureWatcher<QByteArray>(this);
+        connect(watcher, &QFutureWatcher<QByteArray>::finished, this, [this,watcher] {
+            QByteArray digest = watcher->result();
+            watcher->deleteLater();
+            if (!busy || phase != Phase::Hashing) return;
+            if (digest.isEmpty()) { stopped("Cannot compute local SHA-256"); return; }
+            fileHash = digest.toHex();
+            phase = Phase::Finalizing;
+            controlRetry = 0;
+            finalize();
+        });
         watcher->setFuture(QtConcurrent::run([filePath] {
-            QFile f(filePath);if(!f.open(QIODevice::ReadOnly))return QByteArray();
-            QCryptographicHash hash(QCryptographicHash::Sha256);
-            while(!f.atEnd()){
-                auto b=f.read(1<<20);if(b.isEmpty()&&!f.atEnd())return QByteArray();
-                hash.addData(b);
+            QFile file(filePath);
+            if (!file.open(QIODevice::ReadOnly)) return QByteArray();
+            QCryptographicHash sha(QCryptographicHash::Sha256);
+            while (!file.atEnd()) {
+                const QByteArray block = file.read(1<<20);
+                if (block.isEmpty() && !file.atEnd()) return QByteArray();
+                sha.addData(block);
             }
-            return hash.result();
+            return sha.result();
         }));
     }
-    void stopped(const QString &why){note(why);current->setText(why);busy=false;paused=false;refreshControls();}
+    QByteArray fileHash;
+    void finalize() {
+        if (!busy || paused || phase != Phase::Finalizing || controlPending) return;
+        controlPending = true;
+        const QJsonObject payload{{"sha256",QString::fromLatin1(fileHash)}};
+        send("POST", QString("/api/v2/uploads/%1/finalize").arg(uploadId),
+             QJsonDocument(payload).toJson(), [this](int code, QJsonObject, QString error) {
+            controlPending = false;
+            if (!busy || phase != Phase::Finalizing) return;
+            if (code < 200 || code >= 300) { retryControl("Finalize",code,error); return; }
+            note("Completed: " + queue[fileIndex].relative);
+            doneBytes += queue[fileIndex].size;
+            confirmedBytes = 0;
+            ++fileIndex; controlRetry = 0;
+            uploadId.clear();
+            updateProgress();
+            startNext();
+        });
+    }
+    void stopped(const QString &why) {
+        controlTimer->stop();
+        note(why);
+        current->setText(why);
+        busy = paused = false;
+        phase = Phase::Idle;
+        refreshControls();
+    }
 };
 
-int main(int argc,char **argv){
+int main(int argc, char **argv) {
     QApplication app(argc,argv);
-    app.setApplicationName("MediaBridge");app.setOrganizationName("Evalisk");
-    MainWindow w;w.show();return app.exec();
+    app.setApplicationName("MediaBridge");
+    app.setOrganizationName("Evalisk");
+    MainWindow window;
+    window.show();
+    return app.exec();
 }

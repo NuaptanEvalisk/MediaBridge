@@ -31,6 +31,7 @@ type Server struct {
 	allowed      []*net.IPNet
 	uploadMu     sync.Mutex
 	uploadLocks  map[string]*sync.Mutex
+	inFlight     map[string]map[int]bool
 	loginMu      sync.Mutex
 	loginURL     string
 	loginBusy    bool
@@ -90,6 +91,9 @@ func main() {
 	data.HandleFunc("POST /api/v1/uploads", s.startUpload)
 	data.HandleFunc("PUT /api/v1/uploads/{id}/chunk", s.chunk)
 	data.HandleFunc("POST /api/v1/uploads/{id}/finalize", s.finalize)
+	data.HandleFunc("POST /api/v2/uploads", s.startParallelUpload)
+	data.HandleFunc("PUT /api/v2/uploads/{id}/chunks/{index}", s.parallelChunk)
+	data.HandleFunc("POST /api/v2/uploads/{id}/finalize", s.finalizeParallel)
 	adminSrv := &http.Server{Addr: env("MB_ADMIN_LISTEN", ":8080"), Handler: s.guardAdmin(admin), ReadHeaderTimeout: 5 * time.Second}
 	dataSrv := &http.Server{Addr: env("MB_DATA_LISTEN", ":8081"), Handler: data, ReadHeaderTimeout: 5 * time.Second}
 	go func() {

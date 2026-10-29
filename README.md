@@ -58,8 +58,14 @@ browse, upload, download or delete media. **All WebUI elements use 0px corners.*
 ## Upload semantics
 
 - Recursive directory transfer preserves the selected top-level folder name.
-- Chunked upload (4 MiB client chunks; 8 MiB server maximum).
-- Durable server-side partial files allow resume after client/server restart.
+- Parallel range upload using 4 MiB chunks (1–8 concurrent requests per file,
+  configured in the Desktop window; default 4).
+- The Desktop forces a direct network connection, bypassing HTTP proxy settings
+  so Tailnet transfers are not accidentally routed through local Clash/Mihomo.
+- Transient HTTP 502/503/504, timeouts and disconnects are automatically
+  retried using bounded exponential backoff; individual chunks are idempotent.
+- Durable server-side chunk bitmap allows out-of-order uploads and resume
+  after client/server restart, including migration of existing V1 partial files.
 - SHA-256 verification before the file becomes visible at its final path.
 - Atomic no-overwrite publication using a hard link on the same ZFS dataset.
 - The hidden `.mediabridge-staging` directory contains a `.ignore` marker for
@@ -117,11 +123,14 @@ trade-off should be revisited before treating the app as production-hardened.
 
 ## Current limitations
 
-- Upload queue runs sequentially within one Desktop instance. Different
-  clients/uploads may transfer concurrently.
+- The Desktop processes files sequentially, but chunks within each file can
+  transfer concurrently. Different Desktop clients can upload simultaneously.
 - Pausing happens after the current chunk.
-- Network interruptions are resumed by reselecting the same directory and
-  starting a new queue; server identifies matching incomplete uploads.
+- Network interruptions retry automatically without user action. Restarting
+  the Desktop and selecting the same directory reuses existing V1/V2 partial
+  data. Already finished destinations are skipped, not overwritten.
+- The Desktop respects the KDE/Qt-native widget style, palette and fonts:
+  no application-wide stylesheet is installed.
 - No server-side per-device quota or request rate limiter yet.
 - No automatic conflict resolution, file deletion, or directory browsing.
 - No automated server image publication, Tailnet enrollment, or Cloudflare

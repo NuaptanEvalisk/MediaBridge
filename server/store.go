@@ -24,13 +24,15 @@ type Device struct {
 }
 
 type Upload struct {
-	ID       string    `json:"id"`
-	Owner    string    `json:"owner"`
-	Path     string    `json:"path"`
-	Size     int64     `json:"size"`
-	ModTime  int64     `json:"mod_time"`
-	Created  time.Time `json:"created"`
-	Complete bool      `json:"complete"`
+	ID        string    `json:"id"`
+	Owner     string    `json:"owner"`
+	Path      string    `json:"path"`
+	Size      int64     `json:"size"`
+	ModTime   int64     `json:"mod_time"`
+	Created   time.Time `json:"created"`
+	Complete  bool      `json:"complete"`
+	ChunkSize int64     `json:"chunk_size,omitempty"`
+	Bitmap    []byte    `json:"bitmap,omitempty"`
 }
 
 type database struct {

@@ -142,6 +142,13 @@ func (s *Server) chunk(w http.ResponseWriter, r *http.Request) {
 	lock.Lock()
 	defer lock.Unlock()
 	s.store.mu.Lock()
+	if current := s.store.data.Uploads[u.ID]; current == nil || current.ChunkSize != 0 {
+		s.store.mu.Unlock()
+		fail(w, 409, "upload is using parallel chunk protocol")
+		return
+	}
+	s.store.mu.Unlock()
+	s.store.mu.Lock()
 	d := s.store.data.Devices[u.Owner]
 	approved := d != nil && d.State == "approved"
 	s.store.mu.Unlock()
