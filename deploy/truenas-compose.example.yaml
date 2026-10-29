@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# TrueNAS SCALE 25.10 Custom App template.
+# DO NOT deploy unchanged: build/publish the server image, verify dataset paths,
+# configure Cloudflare Access, and verify the management source-IP allowlist.
+services:
+  tailscale:
+    image: tailscale/tailscale:v1.104.2
+    hostname: media-ingest
+    environment:
+      TS_HOSTNAME: media-ingest
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SOCKET: /run/tailscale/tailscaled.sock
+      TS_AUTH_ONCE: "true"
+      TS_USERSPACE: "false"
+      TS_ACCEPT_DNS: "false"
+    volumes:
+      - /mnt/tank/apps/mediabridge/tailscale:/var/lib/tailscale
+      - tailscale-socket:/run/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      # Management only. Do NOT publish receiver port 8081.
+      - "192.168.88.11:30079:8080/tcp"
+    restart: unless-stopped
+
+  mediabridge:
+    # Replace this placeholder with an actually published image.
+    image: YOUR_REGISTRY/mediabridge-server:0.1.0
+    user: "0:568"
+    network_mode: "service:tailscale"
+    depends_on:
+      - tailscale
+    environment:
+      MB_MEDIA_DIR: /media
+      MB_STATE_DIR: /state
+      MB_TS_SOCKET: /run/tailscale/tailscaled.sock
+      MB_ADMIN_ALLOWED_CIDRS: "192.168.88.7/32,127.0.0.1/32,::1/128"
+    volumes:
+      - /mnt/tank/data/media:/media:rw
+      - /mnt/tank/apps/mediabridge/server:/state:rw
+      - tailscale-socket:/run/tailscale
+    cap_drop:
+      - ALL
+    cap_add:
+      # Required to give committed media files UID 33 / GID 568.
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  tailscale-socket:

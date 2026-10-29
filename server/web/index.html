@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MediaBridge / Administration</title><link rel="stylesheet" href="/app.css"></head>
+<body><main>
+<header><h1>MEDIABRIDGE</h1><span>ADMINISTRATION</span></header>
+<section><h2>TAILSCALE</h2><div class="grid">
+<div><div class="caption">STATUS</div><strong id="ts-state">Loading</strong></div>
+<div><div class="caption">HOST</div><strong id="ts-host">—</strong></div>
+<div><div class="caption">TAILNET ADDRESS</div><strong id="ts-ip">—</strong></div>
+</div><div id="login-url"></div><div class="actions"><button id="login">CONNECT / REAUTHENTICATE</button><button id="logout" class="outline">LOG OUT</button></div></section>
+<section><div class="section-heading"><h2>DESKTOP REQUESTS</h2><button id="refresh" class="outline">REFRESH</button></div>
+<p class="info">A Desktop requests access with a local random credential. Approval is permanent until revoked. No passwords are required.</p>
+<table><thead><tr><th>DEVICE</th><th>REQUESTED</th><th>STATE</th><th>ACTION</th></tr></thead><tbody id="devices"><tr><td colspan="4">Loading</td></tr></tbody></table></section>
+<section><h2>RECEIVER</h2><div class="grid"><div><div class="caption">DATA PORT</div><strong>8081 / TAILNET ONLY</strong></div><div><div class="caption">ACTIVE UPLOADS</div><strong id="uploads">—</strong></div><div><div class="caption">TARGET</div><strong>/media</strong></div></div></section>
+<footer id="message">Protected upstream by Cloudflare Access. No application-level WebUI login.</footer>
+</main><script src="/app.js" defer></script></body></html>

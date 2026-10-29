@@ -1,0 +1,9 @@
+build/
+dist/
+.cache/
+.idea/
+*.user
+*.swp
+cmake-build-*/
+server/state/
+desktop/.qt/
