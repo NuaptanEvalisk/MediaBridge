@@ -14,8 +14,8 @@ deployment and end-to-end validation before production use.
 - Storage: `/mnt/tank/data/media`, mounted as `/media` in the receiver.
 - Media permissions: UID 33, GID 568 (`apps`), preserving the existing POSIX
   ACL design. Existing Jellyfin and FileBrowser Apps remain unchanged.
-- Management: `https://mbridge.evalisk.org` via Cloudflare Access, ZBook
-  Cloudflare Tunnel, then `http://192.168.88.11:30079`.
+- Management: an Access-protected hostname through the ZBook Cloudflare Tunnel,
+  then the TrueNAS LAN IP on port 30079.
 - Data: Chelonia's existing Tailscale connection directly to the new
   `media-ingest` Tailnet node on TCP port 8081. No Cloudflare or SSH transfer.
 
@@ -44,7 +44,8 @@ desktop machine itself.
 The administrative WebUI has **no application-level login**. Cloudflare Access
 must enforce authentication **before** traffic can reach the origin. The
 server also checks the immediate peer IP against `MB_ADMIN_ALLOWED_CIDRS`, by
-default allowing only the ZBook origin proxy at `192.168.88.7` and loopback.
+default allowing only loopback. Supply the expected ZBook proxy address in
+the production Compose configuration.
 Never publish port 8080 on the internet, enable Cloudflare bypass policies,
 or expose it directly to untrusted LAN clients. The source-IP restriction must
 be tested behind the actual Docker port publishing path; Docker NAT may affect

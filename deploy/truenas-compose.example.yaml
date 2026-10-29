@@ -14,7 +14,7 @@ services:
       TS_USERSPACE: "false"
       TS_ACCEPT_DNS: "false"
     volumes:
-      - /mnt/tank/apps/mediabridge/tailscale:/var/lib/tailscale
+      - /mnt/POOL/apps/mediabridge/tailscale:/var/lib/tailscale
       - tailscale-socket:/run/tailscale
     devices:
       - /dev/net/tun:/dev/net/tun
@@ -23,12 +23,12 @@ services:
       - NET_RAW
     ports:
       # Management only. Do NOT publish receiver port 8081.
-      - "192.168.88.11:30079:8080/tcp"
+      - "NAS_LAN_IP:30079:8080/tcp"
     restart: unless-stopped
 
   mediabridge:
     # Replace this placeholder with an actually published image.
-    image: YOUR_REGISTRY/mediabridge-server:0.1.0
+    image: ghcr.io/nuaptanevalisk/mediabridge-server:latest
     user: "0:568"
     network_mode: "service:tailscale"
     depends_on:
@@ -37,10 +37,10 @@ services:
       MB_MEDIA_DIR: /media
       MB_STATE_DIR: /state
       MB_TS_SOCKET: /run/tailscale/tailscaled.sock
-      MB_ADMIN_ALLOWED_CIDRS: "192.168.88.7/32,127.0.0.1/32,::1/128"
+      MB_ADMIN_ALLOWED_CIDRS: "ZBOOK_LAN_IP/32,127.0.0.1/32,::1/128"
     volumes:
-      - /mnt/tank/data/media:/media:rw
-      - /mnt/tank/apps/mediabridge/server:/state:rw
+      - /mnt/POOL/data/media:/media:rw
+      - /mnt/POOL/apps/mediabridge/server:/state:rw
       - tailscale-socket:/run/tailscale
     cap_drop:
       - ALL

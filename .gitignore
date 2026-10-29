@@ -7,3 +7,5 @@ dist/
 cmake-build-*/
 server/state/
 desktop/.qt/
+deploy/production*.yaml
+deploy/*.private.yaml

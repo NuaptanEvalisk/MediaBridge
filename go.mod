@@ -1,3 +1,3 @@
-module github.com/evalisk/mediabridge
+module github.com/NuaptanEvalisk/MediaBridge
 
 go 1.26

@@ -67,7 +67,7 @@ func main() {
 		log.Fatal(err)
 	}
 	s := &Server{store: store, media: media, stage: stage, uploadLocks: make(map[string]*sync.Mutex)}
-	for _, cidr := range strings.Split(env("MB_ADMIN_ALLOWED_CIDRS", "127.0.0.1/32,::1/128,192.168.88.7/32"), ",") {
+	for _, cidr := range strings.Split(env("MB_ADMIN_ALLOWED_CIDRS", "127.0.0.1/32,::1/128"), ",") {
 		_, netw, err := net.ParseCIDR(strings.TrimSpace(cidr))
 		if err != nil {
 			log.Fatalf("invalid admin CIDR %q: %v", cidr, err)
