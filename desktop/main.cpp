@@ -5,11 +5,13 @@
 #include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QGroupBox>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -36,6 +38,7 @@
 #include <QtConcurrent>
 #include <QVBoxLayout>
 #include <functional>
+#include <cmath>
 
 struct FileEntry {
     QString absolute;
@@ -112,6 +115,24 @@ public:
         bar->setRange(0, 1000);
         bar->setValue(0);
         uploadLayout->addWidget(bar);
+        auto *metrics = new QGridLayout;
+        metrics->addWidget(new QLabel("Speed"), 0, 0);
+        metrics->addWidget(new QLabel("Elapsed"), 0, 1);
+        metrics->addWidget(new QLabel("ETA"), 0, 2);
+        speedLabel = new QLabel("—");
+        elapsedLabel = new QLabel("00:00");
+        etaLabel = new QLabel("—");
+        QFont metricFont = speedLabel->font();
+        metricFont.setBold(true);
+        speedLabel->setFont(metricFont);
+        elapsedLabel->setFont(metricFont);
+        etaLabel->setFont(metricFont);
+        metrics->addWidget(speedLabel, 1, 0);
+        metrics->addWidget(elapsedLabel, 1, 1);
+        metrics->addWidget(etaLabel, 1, 2);
+        for (int column = 0; column < 3; ++column)
+            metrics->setColumnStretch(column, 1);
+        uploadLayout->addLayout(metrics);
         auto *buttonRow = new QHBoxLayout;
         startButton = new QPushButton("Start upload");
         pauseButton = new QPushButton("Pause");
@@ -137,6 +158,9 @@ public:
             if (phase == Phase::Starting) startNext();
             else if (phase == Phase::Finalizing) finalize();
         });
+        metricsTimer = new QTimer(this);
+        metricsTimer->setInterval(1000);
+        connect(metricsTimer, &QTimer::timeout, this, [this]{ updateMetrics(); });
         loadIdentity();
         connect(requestButton, &QPushButton::clicked, this, [this]{ requestPairing(); });
         connect(chooseButton, &QPushButton::clicked, this, [this]{ selectDirectory(); });
@@ -160,11 +184,17 @@ private:
     QNetworkAccessManager manager;
     QLineEdit *address = nullptr, *directory = nullptr;
     QLabel *approval = nullptr, *summary = nullptr, *current = nullptr;
+    QLabel *speedLabel = nullptr, *elapsedLabel = nullptr, *etaLabel = nullptr;
     QPushButton *requestButton = nullptr, *chooseButton = nullptr, *startButton = nullptr, *pauseButton = nullptr;
     QSpinBox *parallelism = nullptr;
     QProgressBar *bar = nullptr;
     QTextEdit *logView = nullptr;
     QTimer *controlTimer = nullptr;
+    QTimer *metricsTimer = nullptr;
+    QElapsedTimer sessionClock;
+    qint64 pausedMillis = 0, pauseStartedMillis = -1;
+    qint64 sessionTransferredBytes = 0;
+    QList<QPair<qint64, qint64>> speedSamples;
     QString id, token, pairedServer;
     bool revoked = false, approved = false, busy = false, paused = false;
     Phase phase = Phase::Idle;
@@ -278,7 +308,11 @@ private:
             revoked = state == "revoked";
             approval->setText(state.toUpper());
             if (wasApproved && !approved) {
-                paused = true;
+                if (busy && !paused) {
+                    paused = true;
+                    pauseStartedMillis = sessionClock.elapsed();
+                    updateMetrics();
+                }
                 note("Access revoked; uploads paused");
             }
             refreshControls();
@@ -317,6 +351,14 @@ private:
         busy = true;
         paused = false;
         controlRetry = 0;
+        pausedMillis = 0;
+        pauseStartedMillis = -1;
+        sessionTransferredBytes = 0;
+        speedSamples.clear();
+        sessionClock.start();
+        speedSamples.append({0, 0});
+        metricsTimer->start();
+        updateMetrics();
         note(QString("Starting %1 files (%2 MB) with %3 parallel chunks")
              .arg(queue.size()).arg(double(totalBytes)/1e6, 0, 'f', 1).arg(parallelism->value()));
         refreshControls();
@@ -324,6 +366,16 @@ private:
     }
     void togglePause() {
         paused = !paused;
+        if (paused) {
+            pauseStartedMillis = sessionClock.elapsed();
+        } else if (pauseStartedMillis >= 0) {
+            pausedMillis += sessionClock.elapsed() - pauseStartedMillis;
+            pauseStartedMillis = -1;
+            // A paused interval should not dilute the resumed transfer speed.
+            speedSamples.clear();
+            speedSamples.append({activeElapsedMillis(), sessionTransferredBytes});
+        }
+        updateMetrics();
         note(paused ? "Paused (current requests may finish)" : "Resumed");
         refreshControls();
         if (paused) return;
@@ -343,6 +395,63 @@ private:
             current->setText(QString("%1 / %2 — %3  (%4 MB / %5 MB)")
                 .arg(fileIndex + 1).arg(queue.size()).arg(queue[fileIndex].relative)
                 .arg(double(progressed) / 1e6, 0, 'f', 1).arg(double(totalBytes) / 1e6, 0, 'f', 1));
+        }
+        updateMetrics();
+    }
+    qint64 activeElapsedMillis() const {
+        if (!sessionClock.isValid()) return 0;
+        const qint64 end = pauseStartedMillis >= 0 ? pauseStartedMillis : sessionClock.elapsed();
+        return qMax(qint64(0), end - pausedMillis);
+    }
+    static QString formatDuration(qint64 seconds) {
+        seconds = qMax(qint64(0), seconds);
+        const qint64 hours = seconds / 3600;
+        const qint64 minutes = (seconds / 60) % 60;
+        const qint64 remainder = seconds % 60;
+        if (hours > 0) {
+            return QString("%1:%2:%3").arg(hours)
+                .arg(minutes, 2, 10, QChar('0'))
+                .arg(remainder, 2, 10, QChar('0'));
+        }
+        return QString("%1:%2").arg(seconds / 60)
+            .arg(remainder, 2, 10, QChar('0'));
+    }
+    void updateMetrics() {
+        if (!sessionClock.isValid()) return;
+        const qint64 now = activeElapsedMillis();
+        elapsedLabel->setText(formatDuration(now / 1000));
+        if (!paused && busy) {
+            speedSamples.append({now, sessionTransferredBytes});
+            // Calculate recent acknowledged payload throughput over ~10 seconds.
+            while (speedSamples.size() > 2 && speedSamples.at(1).first <= now - 10000)
+                speedSamples.removeFirst();
+        }
+        double bytesPerSecond = 0.0;
+        if (!paused && busy && speedSamples.size() >= 2) {
+            const auto &first = speedSamples.first();
+            const qint64 duration = now - first.first;
+            if (duration >= 1000 && sessionTransferredBytes >= first.second)
+                bytesPerSecond = double(sessionTransferredBytes - first.second) * 1000.0 / double(duration);
+        }
+        speedLabel->setText(QString("%1 MiB/s").arg(bytesPerSecond / 1048576.0, 0, 'f', 2));
+        if (!busy) {
+            etaLabel->setText(phase == Phase::Idle && doneBytes == totalBytes && totalBytes > 0
+                                  ? "Complete" : "—");
+        } else if (paused) {
+            etaLabel->setText("Paused");
+        } else if (phase == Phase::Hashing) {
+            etaLabel->setText("Verifying...");
+        } else if (phase == Phase::Finalizing) {
+            etaLabel->setText("Finalizing...");
+        } else {
+            const qint64 remaining = qMax(qint64(0), totalBytes - doneBytes - confirmedBytes);
+            if (remaining == 0 || bytesPerSecond < 1.0) {
+                etaLabel->setText(remaining == 0 ? "Finishing..." : "Calculating...");
+            } else {
+                const double seconds = std::ceil(double(remaining) / bytesPerSecond);
+                etaLabel->setText(seconds < double(1000000000LL)
+                                      ? formatDuration(qint64(seconds)) : "—");
+            }
         }
     }
     static bool transient(int status) {
@@ -366,6 +475,8 @@ private:
             busy = false; phase = Phase::Idle;
             current->setText("Completed");
             bar->setValue(1000);
+            metricsTimer->stop();
+            updateMetrics();
             note("All files uploaded");
             refreshControls();
             return;
@@ -447,7 +558,11 @@ private:
             if (code >= 200 && code < 300) {
                 if (!doneChunks.testBit(index)) {
                     doneChunks.setBit(index);
-                    confirmedBytes += qMin(chunkSize, queue[fileIndex].size - qint64(index)*chunkSize);
+                    const qint64 accepted = qMin(chunkSize, queue[fileIndex].size - qint64(index)*chunkSize);
+                    confirmedBytes += accepted;
+                    // Only chunks confirmed in this session contribute to
+                    // throughput. Restored progress must not inflate speed.
+                    sessionTransferredBytes += accepted;
                 }
                 activeChunks.remove(index);
                 retryWaiting.remove(index);
@@ -520,6 +635,9 @@ private:
         current->setText(why);
         busy = paused = false;
         phase = Phase::Idle;
+        pauseStartedMillis = -1;
+        metricsTimer->stop();
+        updateMetrics();
         refreshControls();
     }
 };

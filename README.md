@@ -131,6 +131,11 @@ trade-off should be revisited before treating the app as production-hardened.
   data. Already finished destinations are skipped, not overwritten.
 - The Desktop respects the KDE/Qt-native widget style, palette and fonts:
   no application-wide stylesheet is installed.
+- The Desktop displays rolling acknowledged-payload throughput (MiB/s), active
+  elapsed time (excluding pauses), and a remaining-time estimate based on the
+  last approximately ten seconds of throughput. Previously uploaded chunks
+  and skipped existing files do not count as new transferred bytes. ETA shows
+  a status instead of an estimate while paused, verifying or finalizing.
 - No server-side per-device quota or request rate limiter yet.
 - No automatic conflict resolution, file deletion, or directory browsing.
 - No automated server image publication, Tailnet enrollment, or Cloudflare
