@@ -176,6 +176,13 @@ To adapt the example:
    destination service can read it and that incomplete staging files are
    excluded from any media-library scans.
 
+The receiver runs with a restricted capability set: `CHOWN` for media file
+ownership, `FOWNER` for idempotent metadata changes on previously committed
+staging files, and `DAC_OVERRIDE` to publish into directories that permit
+owner writes but not group writes. These permissions apply within the
+container's mounts; review the mounted paths and container security model
+before deployment. MediaBridge does not recursively change dataset ACLs.
+
 The server defaults to management port `8080` and receiver port `8081`
 inside the application. Container host port mappings, IP addresses, paths and
 hostnames are **deployment-specific**. The example Compose file is a template

@@ -529,6 +529,12 @@ private:
         return qMin(30000, 1000 * (1 << qMin(attempt, 5)));
     }
     void retryControl(const QString &operation, int status, const QString &error) {
+        // A permission/ownership failure at commit time is deterministic.
+        // Retryable network failures still use exponential backoff.
+        if (operation == "Finalize" && status == 500) {
+            stopped("Finalize requires server attention: " + error);
+            return;
+        }
         if (!transient(status)) { stopped(operation + ": " + error); return; }
         const int delay = retryDelay(controlRetry++);
         if (controlRetry == 1 || controlRetry % 5 == 0)

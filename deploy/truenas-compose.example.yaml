@@ -48,6 +48,12 @@ services:
     cap_add:
       # Required to give committed media files UID 33 / GID 568.
       - CHOWN
+      # Repeated commit requests may involve staged files already owned by
+      # the final media UID; restricted root needs FOWNER for chmod.
+      - FOWNER
+      # Media directories can be owner-writable but group-read-only.
+      # The receiver must publish files without rewriting dataset ACLs.
+      - DAC_OVERRIDE
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped

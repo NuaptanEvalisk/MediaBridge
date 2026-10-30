@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -253,15 +254,9 @@ func (s *Server) finalize(w http.ResponseWriter, r *http.Request) {
 	}
 	// A hard-link is an atomic no-clobber publication on the same ZFS dataset.
 	// An already existing destination is never replaced.
-	if err := os.Chmod(part, 0660); err != nil {
-		fail(w, 500, "cannot set media permissions")
+	if err := ensureMediaFilePermissions(part); err != nil {
+		fail(w, 500, fmt.Sprintf("cannot prepare media permissions: %v", err))
 		return
-	}
-	if os.Geteuid() == 0 {
-		if err := os.Chown(part, 33, 568); err != nil {
-			fail(w, 500, "cannot set Jellyfin-compatible ownership")
-			return
-		}
 	}
 	if err := os.Link(part, dest); err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -277,6 +272,37 @@ func (s *Server) finalize(w http.ResponseWriter, r *http.Request) {
 		log.Printf("completed upload metadata save failed: %v", err)
 	}
 	respond(w, 200, map[string]any{"state": "complete", "path": u.Path})
+}
+
+// A previous commit attempt might already have changed the staged file's
+// owner before a later filesystem operation failed. Avoid chmod/chown when
+// the requested metadata is already present: repeated operations are not
+// harmless under restricted Linux container capabilities or inherited ACLs.
+func ensureMediaFilePermissions(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("staging path is not a regular file")
+	}
+	if info.Mode().Perm() != 0660 {
+		if err := os.Chmod(path, 0660); err != nil {
+			return fmt.Errorf("chmod: %w", err)
+		}
+	}
+	if os.Geteuid() == 0 {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("cannot read file ownership")
+		}
+		if stat.Uid != 33 || stat.Gid != 568 {
+			if err := os.Chown(path, 33, 568); err != nil {
+				return fmt.Errorf("chown: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Server) destinationPath(rel string) (string, error) {

@@ -151,3 +151,40 @@ func TestPathValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestMediaPermissionsAreIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "existing-staged-file.part")
+	if err := os.WriteFile(path, []byte("data"), 0660); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0660); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureMediaFilePermissions(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureMediaFilePermissions(path); err != nil {
+		t.Fatalf("repeated permission preparation must be harmless: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode().Perm() != 0660 {
+		t.Fatalf("unexpected mode after retry: %v", after.Mode())
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("staging inode was replaced")
+	}
+	symlink := filepath.Join(t.TempDir(), "staged-link")
+	if err := os.Symlink(path, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureMediaFilePermissions(symlink); err == nil {
+		t.Fatal("staging symlink should be rejected")
+	}
+}
