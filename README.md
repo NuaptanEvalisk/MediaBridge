@@ -19,6 +19,10 @@ self-hosted project, not a turnkey commercial file-transfer service.
   pause or resume transfers, and use the system's widget theme and palette.
 - **Live statistics:** transfer speed in MiB/s, active elapsed time and
   estimated time remaining (ETA).
+- **Collapsible live charts:** a five-minute throughput history graph and a
+  Free Download Manager-style, color-coded chunk map showing confirmed,
+  active, retrying and pending chunks. Both views are collapsed by default.
+  Mouse over a chunk cell to see its index (or chunk range for large files).
 - **Configurable parallelism:** 1–24 simultaneous 4 MiB chunks per file;
   manual mode defaults to four. Optional adaptive mode starts at four,
   progressively probes higher concurrency, and returns to the best observed
@@ -81,6 +85,16 @@ Its speed display uses a rolling window of newly acknowledged payload bytes;
 previously uploaded chunks do not inflate the reported rate. Elapsed time
 excludes manual pauses. ETA is an estimate based on recent throughput and may
 fluctuate as the network changes.
+
+Click **Transfer speed history (last 5 min)** or **Chunk map (current file)**
+to expand or collapse either live view. The speed graph samples acknowledged
+upload throughput once per second; it marks pauses and file verification as
+gaps, and retains five minutes of history even while collapsed. The chunk map
+uses the receiver's resume bitmap plus in-flight and retry state; previously
+uploaded chunks appear as complete immediately, without being transferred
+again. Large files aggregate contiguous chunk ranges into display cells to
+avoid excessive UI objects or per-chunk widget allocation. Rendering uses
+Qt's native palette and does not affect the server or transfer protocol.
 
 Adaptive parallelism uses short, warmed-up measurement windows of actual
 acknowledged payload throughput. It begins with four concurrent chunks and

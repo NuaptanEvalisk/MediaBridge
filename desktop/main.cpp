@@ -37,6 +37,7 @@
 #include <QSysInfo>
 #include <QTextEdit>
 #include <QTimer>
+#include <QToolButton>
 #include <QUrl>
 #include <QtConcurrent>
 #include <QVBoxLayout>
@@ -44,6 +45,7 @@
 #include <cmath>
 #include "adaptive_cache.h"
 #include "adaptive_parallelism.h"
+#include "transfer_charts.h"
 
 struct FileEntry {
     QString absolute;
@@ -160,6 +162,38 @@ public:
         buttonRow->addWidget(pauseButton);
         buttonRow->addStretch();
         uploadLayout->addLayout(buttonRow);
+
+        // Both views default to collapsed. Their data is retained while
+        // hidden, so expanding a view shows the recent transfer immediately.
+        speedGraph = new SpeedGraph;
+        chunkGraph = new ChunkMap;
+        chunkFileLabel = new QLabel("No active file");
+        chunkFileLabel->setWordWrap(true);
+        auto addCollapsible = [uploadLayout](const QString &title, QWidget *chart,
+                                            QLabel *header = nullptr) {
+            auto *toggle = new QToolButton;
+            toggle->setText(title);
+            toggle->setArrowType(Qt::RightArrow);
+            toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+            toggle->setCheckable(true);
+            toggle->setChecked(false);
+            toggle->setAutoRaise(true);
+            uploadLayout->addWidget(toggle);
+            auto *body = new QWidget;
+            auto *bodyLayout = new QVBoxLayout(body);
+            bodyLayout->setContentsMargins(0, 0, 0, 4);
+            bodyLayout->setSpacing(2);
+            if (header) bodyLayout->addWidget(header);
+            bodyLayout->addWidget(chart);
+            uploadLayout->addWidget(body);
+            body->setVisible(false);
+            QObject::connect(toggle, &QToolButton::toggled, body, [toggle,body](bool open) {
+                toggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+                body->setVisible(open);
+            });
+        };
+        addCollapsible("Transfer speed history (last 5 min)", speedGraph);
+        addCollapsible("Chunk map (current file)", chunkGraph, chunkFileLabel);
         v->addWidget(uploadBox);
 
         logView = new QTextEdit;
@@ -180,7 +214,10 @@ public:
         });
         metricsTimer = new QTimer(this);
         metricsTimer->setInterval(1000);
-        connect(metricsTimer, &QTimer::timeout, this, [this]{ updateMetrics(); });
+        connect(metricsTimer, &QTimer::timeout, this, [this] {
+            updateMetrics();
+            refreshVisualizations();
+        });
         loadIdentity();
         connect(requestButton, &QPushButton::clicked, this, [this]{ requestPairing(); });
         connect(chooseButton, &QPushButton::clicked, this, [this]{ selectDirectory(); });
@@ -230,6 +267,10 @@ private:
     qint64 cachedMonitorStarted = -1, cachedSlowSince = -1;
     int cachedChunkFailures = 0;
     QProgressBar *bar = nullptr;
+    SpeedGraph *speedGraph = nullptr;
+    ChunkMap *chunkGraph = nullptr;
+    QLabel *chunkFileLabel = nullptr;
+    double latestBytesPerSecond = 0;
     QTextEdit *logView = nullptr;
     QTimer *controlTimer = nullptr;
     QTimer *metricsTimer = nullptr;
@@ -480,6 +521,9 @@ private:
         pauseStartedMillis = -1;
         sessionTransferredBytes = 0;
         speedSamples.clear();
+        speedGraph->clear();
+        chunkGraph->clear();
+        chunkFileLabel->setText("Waiting for the first file...");
         sessionClock.start();
         speedSamples.append({0, 0});
         metricsTimer->start();
@@ -569,6 +613,7 @@ private:
             if (duration >= 1000 && sessionTransferredBytes >= first.second)
                 bytesPerSecond = double(sessionTransferredBytes - first.second) * 1000.0 / double(duration);
         }
+        latestBytesPerSecond = bytesPerSecond;
         speedLabel->setText(QString("%1 MiB/s").arg(bytesPerSecond / 1048576.0, 0, 'f', 2));
         if (adaptive->isChecked() && busy && !paused && phase == Phase::Transferring) {
             if (usingCachedConcurrency) {
@@ -620,6 +665,22 @@ private:
                 etaLabel->setText(seconds < double(1000000000LL)
                                       ? formatDuration(qint64(seconds)) : "—");
             }
+        }
+    }
+    void refreshVisualizations() {
+        if (!sessionClock.isValid()) return;
+        // Wall-clock sampling preserves paused intervals as gaps, and avoids
+        // expensive repaints from the per-chunk completion callbacks.
+        const bool transferring = busy && !paused && phase == Phase::Transferring;
+        speedGraph->append(sessionClock.elapsed(), latestBytesPerSecond / 1048576.0,
+                           transferring);
+        if (phase == Phase::Transferring || phase == Phase::Hashing ||
+            phase == Phase::Finalizing) {
+            QSet<int> retry;
+            for (auto it = attempts.cbegin(); it != attempts.cend(); ++it)
+                if (activeChunks.contains(it.key())) retry.insert(it.key());
+            retry.unite(retryWaiting);
+            chunkGraph->setChunks(doneChunks, activeChunks, retry);
         }
     }
     static bool transient(int status) {
@@ -690,6 +751,9 @@ private:
             }
             activeChunks.clear(); retryWaiting.clear(); attempts.clear();
             phase = Phase::Transferring;
+            chunkFileLabel->setText(QFileInfo(queue[fileIndex].relative).fileName());
+            chunkFileLabel->setToolTip(queue[fileIndex].relative);
+            chunkGraph->setChunks(doneChunks, activeChunks, retryWaiting);
             autoConcurrency.interrupt();
             resetCachedMonitor();
             note(QString("Resuming %1: %2 / %3 MiB already present")
@@ -776,6 +840,7 @@ private:
     void finalizeHash() {
         if (!busy || phase != Phase::Transferring || fileIndex >= queue.size()) return;
         phase = Phase::Hashing;
+        chunkGraph->setChunks(doneChunks, {}, {});
         const QString filePath = queue[fileIndex].absolute;
         note("Verifying SHA-256: " + queue[fileIndex].relative);
         auto *watcher = new QFutureWatcher<QByteArray>(this);

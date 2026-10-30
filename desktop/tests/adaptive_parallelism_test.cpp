@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "../adaptive_parallelism.h"
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <cmath>
 
@@ -53,7 +56,9 @@ int main() {
     controller.reset();
     std::int64_t time = 0, bytes = 0;
     for (int rate = 10; rate < 20; ++rate) {
-        result = measure(controller, time, bytes, rate * 2);
+        // Every new tested tier must be >8% faster, including at 20 and 24
+        // chunks; the former linear +2 MiB/s fixture plateaued too early.
+        result = measure(controller, time, bytes, (rate - 9) * 12);
         time += 15000;
         bytes += 400 * 1024 * 1024;
         if (controller.settled()) break;
