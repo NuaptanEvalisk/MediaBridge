@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include <QApplication>
 #include <QBitArray>
+#include <QCheckBox>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
@@ -41,6 +42,7 @@
 #include <QVBoxLayout>
 #include <functional>
 #include <cmath>
+#include "adaptive_parallelism.h"
 
 struct FileEntry {
     QString absolute;
@@ -109,9 +111,14 @@ public:
         auto *optionsRow = new QHBoxLayout;
         optionsRow->addWidget(new QLabel("Parallel chunks"));
         parallelism = new QSpinBox;
-        parallelism->setRange(1, 8);
+        parallelism->setRange(1, AdaptiveParallelism::kMaximum);
         parallelism->setToolTip("Concurrent 4 MiB chunk requests for a single file.");
         optionsRow->addWidget(parallelism);
+        adaptive = new QCheckBox("Adaptive parallelism");
+        adaptive->setToolTip("Start at 4 chunks, probe higher concurrency and settle at the best observed throughput (up to 24).");
+        optionsRow->addWidget(adaptive);
+        adaptiveStatus = new QLabel;
+        optionsRow->addWidget(adaptiveStatus);
         optionsRow->addStretch();
         uploadLayout->addLayout(optionsRow);
         summary = new QLabel("Choose a folder to upload it, including its subdirectories.");
@@ -176,7 +183,14 @@ public:
         connect(startButton, &QPushButton::clicked, this, [this]{ startUpload(); });
         connect(pauseButton, &QPushButton::clicked, this, [this]{ togglePause(); });
         connect(parallelism, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, [this](int){ if (!id.isEmpty()) saveIdentity(); });
+                this, [this](int) {
+                    if (!id.isEmpty()) saveIdentity();
+                    updateAdaptiveStatus();
+                });
+        connect(adaptive, &QCheckBox::toggled, this, [this] {
+            if (!id.isEmpty()) saveIdentity();
+            refreshControls();
+        });
         auto *timer = new QTimer(this);
         timer->setInterval(5000);
         connect(timer, &QTimer::timeout, this, [this]{ if (!id.isEmpty()) pollApproval(); });
@@ -196,6 +210,9 @@ private:
     QLabel *speedLabel = nullptr, *elapsedLabel = nullptr, *etaLabel = nullptr;
     QPushButton *requestButton = nullptr, *chooseButton = nullptr, *startButton = nullptr, *pauseButton = nullptr;
     QSpinBox *parallelism = nullptr;
+    QCheckBox *adaptive = nullptr;
+    QLabel *adaptiveStatus = nullptr;
+    AdaptiveParallelism autoConcurrency;
     QProgressBar *bar = nullptr;
     QTextEdit *logView = nullptr;
     QTimer *controlTimer = nullptr;
@@ -221,13 +238,16 @@ private:
     }
     void loadIdentity() {
         parallelism->setValue(4);
+        adaptive->setChecked(false);
         QFile file(configPath());
         if (!file.open(QIODevice::ReadOnly)) return;
         const auto config = QJsonDocument::fromJson(file.readAll()).object();
         id = config.value("id").toString();
         token = config.value("token").toString();
         pairedServer = config.value("server").toString();
-        parallelism->setValue(qBound(1, config.value("parallelism").toInt(4), 8));
+        parallelism->setValue(qBound(1, config.value("parallelism").toInt(4),
+                                     AdaptiveParallelism::kMaximum));
+        adaptive->setChecked(config.value("adaptive_parallelism").toBool(false));
         if (!pairedServer.isEmpty()) address->setText(pairedServer);
     }
     bool saveIdentity() {
@@ -235,7 +255,8 @@ private:
         QSaveFile file(configPath());
         if (!file.open(QIODevice::WriteOnly)) return false;
         QJsonObject config{{"id", id}, {"token", token},
-                           {"server", pairedServer}, {"parallelism", parallelism->value()}};
+                           {"server", pairedServer}, {"parallelism", parallelism->value()},
+                           {"adaptive_parallelism", adaptive->isChecked()}};
         if (file.write(QJsonDocument(config).toJson()) < 0 || !file.commit()) return false;
         return QFile::setPermissions(configPath(), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     }
@@ -277,7 +298,22 @@ private:
         requestButton->setEnabled(!busy);
         address->setReadOnly(busy);
         chooseButton->setEnabled(!busy);
-        parallelism->setEnabled(!busy);
+        parallelism->setEnabled(!busy && !adaptive->isChecked());
+        adaptive->setEnabled(!busy);
+        updateAdaptiveStatus();
+    }
+    int targetConcurrency() const {
+        return adaptive->isChecked() ? autoConcurrency.current() : parallelism->value();
+    }
+    void updateAdaptiveStatus() {
+        if (adaptive->isChecked()) {
+            adaptiveStatus->setText(QString("%1 / %2%3")
+                .arg(autoConcurrency.current())
+                .arg(AdaptiveParallelism::kMaximum)
+                .arg(autoConcurrency.settled() ? " (optimized)" : " (probing)"));
+        } else {
+            adaptiveStatus->setText(QString("Fixed: %1").arg(parallelism->value()));
+        }
     }
     void requestPairing() {
         const QUrl server(base());
@@ -360,6 +396,7 @@ private:
         busy = true;
         paused = false;
         controlRetry = 0;
+        autoConcurrency.reset();
         pausedMillis = 0;
         pauseStartedMillis = -1;
         sessionTransferredBytes = 0;
@@ -368,8 +405,11 @@ private:
         speedSamples.append({0, 0});
         metricsTimer->start();
         updateMetrics();
-        note(QString("Starting %1 files (%2 MB) with %3 parallel chunks")
-             .arg(queue.size()).arg(double(totalBytes)/1e6, 0, 'f', 1).arg(parallelism->value()));
+        note(QString("Starting %1 files (%2 MB), %3")
+             .arg(queue.size()).arg(double(totalBytes)/1e6, 0, 'f', 1)
+             .arg(adaptive->isChecked() ? "adaptive parallelism (4–24)"
+                                        : QString("fixed %1 parallel chunks").arg(parallelism->value())));
+        updateAdaptiveStatus();
         refreshControls();
         startNext();
     }
@@ -377,12 +417,14 @@ private:
         paused = !paused;
         if (paused) {
             pauseStartedMillis = sessionClock.elapsed();
+            autoConcurrency.interrupt();
         } else if (pauseStartedMillis >= 0) {
             pausedMillis += sessionClock.elapsed() - pauseStartedMillis;
             pauseStartedMillis = -1;
             // A paused interval should not dilute the resumed transfer speed.
             speedSamples.clear();
             speedSamples.append({activeElapsedMillis(), sessionTransferredBytes});
+            autoConcurrency.interrupt();
         }
         updateMetrics();
         note(paused ? "Paused (current requests may finish)" : "Resumed");
@@ -443,6 +485,22 @@ private:
                 bytesPerSecond = double(sessionTransferredBytes - first.second) * 1000.0 / double(duration);
         }
         speedLabel->setText(QString("%1 MiB/s").arg(bytesPerSecond / 1048576.0, 0, 'f', 2));
+        if (adaptive->isChecked() && busy && !paused && phase == Phase::Transferring) {
+            const int remainingChunks = doneChunks.size() - doneChunks.count(true);
+            const auto decision = autoConcurrency.sample(now, sessionTransferredBytes, remainingChunks);
+            if (decision.decision != AdaptiveParallelism::Decision::None) {
+                if (decision.decision == AdaptiveParallelism::Decision::Increase) {
+                    note(QString("Adaptive: measured %1 MiB/s; testing %2 parallel chunks")
+                         .arg(decision.measuredMiBps, 0, 'f', 2)
+                         .arg(decision.concurrency));
+                } else {
+                    note(QString("Adaptive: settled at %1 chunks (best observed %2 MiB/s)")
+                         .arg(decision.concurrency).arg(decision.bestMiBps, 0, 'f', 2));
+                }
+                updateAdaptiveStatus();
+                scheduleChunks();
+            }
+        }
         if (!busy) {
             etaLabel->setText(phase == Phase::Idle && doneBytes == totalBytes && totalBytes > 0
                                   ? "Complete" : "—");
@@ -525,6 +583,7 @@ private:
             }
             activeChunks.clear(); retryWaiting.clear(); attempts.clear();
             phase = Phase::Transferring;
+            autoConcurrency.interrupt();
             note(QString("Resuming %1: %2 / %3 MiB already present")
                  .arg(queue[fileIndex].relative).arg(double(confirmedBytes)/1048576.0,0,'f',1)
                  .arg(double(queue[fileIndex].size)/1048576.0,0,'f',1));
@@ -534,7 +593,7 @@ private:
     }
     void scheduleChunks() {
         if (!busy || paused || phase != Phase::Transferring) return;
-        while (activeChunks.size() < parallelism->value()) {
+        while (activeChunks.size() < targetConcurrency()) {
             int next = -1;
             for (int i = 0; i < doneChunks.size(); ++i) {
                 if (!doneChunks.testBit(i) && !activeChunks.contains(i)) { next = i; break; }
@@ -581,6 +640,15 @@ private:
                 return;
             }
             if (!transient(code)) { stopped(QString("Chunk %1: %2").arg(index).arg(error)); return; }
+            if (adaptive->isChecked() && !autoConcurrency.settled()) {
+                const auto change = autoConcurrency.networkFailure();
+                if (change.decision == AdaptiveParallelism::Decision::Backoff) {
+                    note(QString("Adaptive: network error; backing off to %1 chunks").arg(change.concurrency));
+                } else {
+                    note("Adaptive: network error; discarding this measurement window");
+                }
+                updateAdaptiveStatus();
+            }
             const int attempt = ++attempts[index];
             if (attempt == 1 || attempt % 5 == 0)
                 note(QString("Chunk %1: HTTP %2 (%3); retrying without losing progress")

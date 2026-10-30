@@ -19,8 +19,11 @@ self-hosted project, not a turnkey commercial file-transfer service.
   pause or resume transfers, and use the system's widget theme and palette.
 - **Live statistics:** transfer speed in MiB/s, active elapsed time and
   estimated time remaining (ETA).
-- **Configurable parallelism:** 1–8 simultaneous 4 MiB chunks per file;
-  defaults to four. Multiple approved desktops may upload independently.
+- **Configurable parallelism:** 1–24 simultaneous 4 MiB chunks per file;
+  manual mode defaults to four. Optional adaptive mode starts at four,
+  progressively probes higher concurrency, and returns to the best observed
+  setting when throughput plateaus or declines. Multiple approved desktops
+  may upload independently.
 - **Resumable uploads:** server-side chunk tracking survives interruptions and
   restarts. Transient network errors are retried automatically.
 - **File integrity:** SHA-256 verification before completed files appear at
@@ -65,7 +68,8 @@ square corners throughout (`border-radius: 0`).
 4. Open the protected management WebUI and click **Approve** for the pending
    desktop. Each desktop is approved independently; access remains valid until
    revoked.
-5. Select a folder, choose a parallel-chunk count and click **Start upload**.
+5. Select a folder, choose a manual parallel-chunk count or enable **Adaptive
+   parallelism**, and click **Start upload**.
 
 The selected directory name and its subdirectories are preserved at the
 destination. Repeating an interrupted upload reuses matching server-side
@@ -77,6 +81,15 @@ Its speed display uses a rolling window of newly acknowledged payload bytes;
 previously uploaded chunks do not inflate the reported rate. Elapsed time
 excludes manual pauses. ETA is an estimate based on recent throughput and may
 fluctuate as the network changes.
+
+Adaptive parallelism uses short, warmed-up measurement windows of actual
+acknowledged payload throughput. It begins with four concurrent chunks and
+tries 6, 8, 10, 12, 16, 20, then 24 while improvements remain significant.
+If another step fails to improve throughput sufficiently, the desktop settles
+at the best tested concurrency instead of keeping unnecessary connections.
+It also discards partial measurements across pauses and file transitions.
+These are online heuristics, not a guaranteed globally optimal benchmark;
+short files may finish before a meaningful comparison is possible.
 
 ## Device authorization
 
