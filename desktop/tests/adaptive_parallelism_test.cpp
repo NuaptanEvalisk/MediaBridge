@@ -16,6 +16,15 @@ int main() {
     using Mode = AdaptiveParallelism::Decision;
     AdaptiveParallelism controller;
     assert(controller.current() == 4);
+    assert(!controller.restore(25));
+    assert(!controller.restore(3));
+    assert(controller.restore(16));
+    assert(controller.current() == 16);
+    assert(controller.settled());
+    assert(controller.best() == 16);
+    assert(controller.sample(0, 0, 500).decision == Mode::None);
+    controller.reset();
+    assert(!controller.settled());
     auto result = measure(controller, 0, 0, 8);
     assert(result.decision == Mode::Increase && controller.current() == 6);
     result = measure(controller, 15000, 150 * 1024 * 1024, 12);

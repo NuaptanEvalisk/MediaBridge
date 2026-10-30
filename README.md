@@ -91,6 +91,16 @@ It also discards partial measurements across pauses and file transitions.
 These are online heuristics, not a guaranteed globally optimal benchmark;
 short files may finish before a meaningful comparison is possible.
 
+The desktop **caches a completed adaptive measurement separately for each
+receiver URL**, in its existing local configuration. A subsequent upload or
+application launch reuses the measured concurrency without probing again.
+Cached results expire after 30 days; sustained large throughput regressions
+or repeated chunk failures can trigger a fresh probe. The **Re-probe** button
+explicitly clears the current receiver's cache: during an upload it immediately
+restarts probing from four lanes (existing in-flight requests finish normally);
+when idle the next upload performs a fresh measurement. No server-side
+settings, chunks, or already uploaded files are changed by this button.
+
 ## Device authorization
 
 MediaBridge does not require a separate username or password on each desktop.

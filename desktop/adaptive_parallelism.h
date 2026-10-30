@@ -40,6 +40,16 @@ public:
     int best() const { return best_; }
     bool settled() const { return settled_; }
 
+    // A previously measured optimum is ready to use immediately: no need to
+    // re-run the throughput sweep on every new upload or app launch.
+    bool restore(int concurrency) {
+        if (concurrency < kInitial || concurrency > kMaximum) return false;
+        reset();
+        current_ = best_ = concurrency;
+        hasBaseline_ = settled_ = true;
+        return true;
+    }
+
     // Call when a file starts or after a manual pause. Keep the best-known
     // concurrency but discard a potentially misleading partial measurement.
     void interrupt() {

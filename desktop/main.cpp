@@ -42,6 +42,7 @@
 #include <QVBoxLayout>
 #include <functional>
 #include <cmath>
+#include "adaptive_cache.h"
 #include "adaptive_parallelism.h"
 
 struct FileEntry {
@@ -119,6 +120,9 @@ public:
         optionsRow->addWidget(adaptive);
         adaptiveStatus = new QLabel;
         optionsRow->addWidget(adaptiveStatus);
+        reprobeButton = new QPushButton("Re-probe");
+        reprobeButton->setToolTip("Forget this server's cached parallelism. Re-test immediately while uploading, or on the next upload.");
+        optionsRow->addWidget(reprobeButton);
         optionsRow->addStretch();
         uploadLayout->addLayout(optionsRow);
         summary = new QLabel("Choose a folder to upload it, including its subdirectories.");
@@ -191,6 +195,12 @@ public:
             if (!id.isEmpty()) saveIdentity();
             refreshControls();
         });
+        connect(reprobeButton, &QPushButton::clicked, this, [this] {
+            reprobeAdaptive("manual request");
+        });
+        connect(address, &QLineEdit::textChanged, this, [this] {
+            if (!busy) refreshControls();
+        });
         auto *timer = new QTimer(this);
         timer->setInterval(5000);
         connect(timer, &QTimer::timeout, this, [this]{ if (!id.isEmpty()) pollApproval(); });
@@ -209,10 +219,16 @@ private:
     QLabel *approval = nullptr, *summary = nullptr, *current = nullptr;
     QLabel *speedLabel = nullptr, *elapsedLabel = nullptr, *etaLabel = nullptr;
     QPushButton *requestButton = nullptr, *chooseButton = nullptr, *startButton = nullptr, *pauseButton = nullptr;
+    QPushButton *reprobeButton = nullptr;
     QSpinBox *parallelism = nullptr;
     QCheckBox *adaptive = nullptr;
     QLabel *adaptiveStatus = nullptr;
     AdaptiveParallelism autoConcurrency;
+    AdaptiveCache adaptiveCache;
+    bool usingCachedConcurrency = false;
+    double cachedMiBps = 0;
+    qint64 cachedMonitorStarted = -1, cachedSlowSince = -1;
+    int cachedChunkFailures = 0;
     QProgressBar *bar = nullptr;
     QTextEdit *logView = nullptr;
     QTimer *controlTimer = nullptr;
@@ -245,6 +261,7 @@ private:
         id = config.value("id").toString();
         token = config.value("token").toString();
         pairedServer = config.value("server").toString();
+        adaptiveCache.load(config.value("adaptive_cache").toObject());
         parallelism->setValue(qBound(1, config.value("parallelism").toInt(4),
                                      AdaptiveParallelism::kMaximum));
         adaptive->setChecked(config.value("adaptive_parallelism").toBool(false));
@@ -256,7 +273,8 @@ private:
         if (!file.open(QIODevice::WriteOnly)) return false;
         QJsonObject config{{"id", id}, {"token", token},
                            {"server", pairedServer}, {"parallelism", parallelism->value()},
-                           {"adaptive_parallelism", adaptive->isChecked()}};
+                           {"adaptive_parallelism", adaptive->isChecked()},
+                           {"adaptive_cache", adaptiveCache.json()}};
         if (file.write(QJsonDocument(config).toJson()) < 0 || !file.commit()) return false;
         return QFile::setPermissions(configPath(), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     }
@@ -300,6 +318,7 @@ private:
         chooseButton->setEnabled(!busy);
         parallelism->setEnabled(!busy && !adaptive->isChecked());
         adaptive->setEnabled(!busy);
+        reprobeButton->setEnabled(adaptive->isChecked() && !base().isEmpty());
         updateAdaptiveStatus();
     }
     int targetConcurrency() const {
@@ -307,12 +326,61 @@ private:
     }
     void updateAdaptiveStatus() {
         if (adaptive->isChecked()) {
-            adaptiveStatus->setText(QString("%1 / %2%3")
-                .arg(autoConcurrency.current())
-                .arg(AdaptiveParallelism::kMaximum)
-                .arg(autoConcurrency.settled() ? " (optimized)" : " (probing)"));
+            if (!busy) {
+                const auto cached = adaptiveCache.find(base(), QDateTime::currentMSecsSinceEpoch());
+                adaptiveStatus->setText(cached
+                    ? QString("Cached: %1 / 24").arg(cached->concurrency)
+                    : QString("4 / 24 (probe on upload)"));
+            } else {
+                adaptiveStatus->setText(QString("%1 / 24 (%2)")
+                    .arg(autoConcurrency.current())
+                    .arg(usingCachedConcurrency ? "cached"
+                         : autoConcurrency.settled() ? "optimized" : "probing"));
+            }
         } else {
             adaptiveStatus->setText(QString("Fixed: %1").arg(parallelism->value()));
+        }
+    }
+    void resetCachedMonitor() {
+        cachedMonitorStarted = -1;
+        cachedSlowSince = -1;
+    }
+    void reprobeAdaptive(const QString &reason) {
+        if (!adaptive->isChecked()) return;
+        adaptiveCache.remove(base());
+        if (!saveIdentity()) note("Could not persist adaptive cache reset");
+        autoConcurrency.reset();
+        usingCachedConcurrency = false;
+        cachedMiBps = 0;
+        cachedChunkFailures = 0;
+        resetCachedMonitor();
+        if (!busy) {
+            note("Adaptive: cleared cached parallelism for this server; next upload will probe from 4");
+        } else {
+            note("Adaptive: " + reason + "; probing from 4 chunks (existing requests will finish)");
+        }
+        updateAdaptiveStatus();
+        if (busy && !paused && phase == Phase::Transferring) scheduleChunks();
+    }
+    void monitorCachedThroughput(qint64 now, double rate) {
+        if (!usingCachedConcurrency || cachedMiBps <= 0) return;
+        if (cachedMonitorStarted < 0) cachedMonitorStarted = now;
+        // Require an established rolling throughput window, enough work left,
+        // and at least 20 seconds of sustained poor transfer performance.
+        const int remaining = doneChunks.size() - doneChunks.count(true);
+        if (now - cachedMonitorStarted < 30000 ||
+            remaining < targetConcurrency() * 2 ||
+            activeChunks.size() < qMin(targetConcurrency(), 4) ||
+            rate <= 0) {
+            cachedSlowSince = -1;
+            return;
+        }
+        if (rate < cachedMiBps * 1048576.0 * 0.55) {
+            if (cachedSlowSince < 0) cachedSlowSince = now;
+            if (now - cachedSlowSince >= 20000)
+                reprobeAdaptive("sustained throughput drop");
+        } else {
+            cachedSlowSince = -1;
         }
     }
     void requestPairing() {
@@ -397,6 +465,17 @@ private:
         paused = false;
         controlRetry = 0;
         autoConcurrency.reset();
+        usingCachedConcurrency = false;
+        cachedMiBps = 0;
+        cachedChunkFailures = 0;
+        resetCachedMonitor();
+        if (adaptive->isChecked()) {
+            const auto cached = adaptiveCache.find(base(), QDateTime::currentMSecsSinceEpoch());
+            if (cached && autoConcurrency.restore(cached->concurrency)) {
+                usingCachedConcurrency = true;
+                cachedMiBps = cached->mibPerSecond;
+            }
+        }
         pausedMillis = 0;
         pauseStartedMillis = -1;
         sessionTransferredBytes = 0;
@@ -405,10 +484,14 @@ private:
         speedSamples.append({0, 0});
         metricsTimer->start();
         updateMetrics();
+        const QString mode = !adaptive->isChecked()
+            ? QString("fixed %1 parallel chunks").arg(parallelism->value())
+            : usingCachedConcurrency
+                ? QString("cached adaptive parallelism (%1 chunks)").arg(autoConcurrency.current())
+                : QString("adaptive parallelism probing (4–24)");
         note(QString("Starting %1 files (%2 MB), %3")
              .arg(queue.size()).arg(double(totalBytes)/1e6, 0, 'f', 1)
-             .arg(adaptive->isChecked() ? "adaptive parallelism (4–24)"
-                                        : QString("fixed %1 parallel chunks").arg(parallelism->value())));
+             .arg(mode));
         updateAdaptiveStatus();
         refreshControls();
         startNext();
@@ -418,6 +501,7 @@ private:
         if (paused) {
             pauseStartedMillis = sessionClock.elapsed();
             autoConcurrency.interrupt();
+            resetCachedMonitor();
         } else if (pauseStartedMillis >= 0) {
             pausedMillis += sessionClock.elapsed() - pauseStartedMillis;
             pauseStartedMillis = -1;
@@ -425,6 +509,7 @@ private:
             speedSamples.clear();
             speedSamples.append({activeElapsedMillis(), sessionTransferredBytes});
             autoConcurrency.interrupt();
+            resetCachedMonitor();
         }
         updateMetrics();
         note(paused ? "Paused (current requests may finish)" : "Resumed");
@@ -486,19 +571,35 @@ private:
         }
         speedLabel->setText(QString("%1 MiB/s").arg(bytesPerSecond / 1048576.0, 0, 'f', 2));
         if (adaptive->isChecked() && busy && !paused && phase == Phase::Transferring) {
-            const int remainingChunks = doneChunks.size() - doneChunks.count(true);
-            const auto decision = autoConcurrency.sample(now, sessionTransferredBytes, remainingChunks);
-            if (decision.decision != AdaptiveParallelism::Decision::None) {
-                if (decision.decision == AdaptiveParallelism::Decision::Increase) {
-                    note(QString("Adaptive: measured %1 MiB/s; testing %2 parallel chunks")
-                         .arg(decision.measuredMiBps, 0, 'f', 2)
-                         .arg(decision.concurrency));
-                } else {
-                    note(QString("Adaptive: settled at %1 chunks (best observed %2 MiB/s)")
-                         .arg(decision.concurrency).arg(decision.bestMiBps, 0, 'f', 2));
+            if (usingCachedConcurrency) {
+                monitorCachedThroughput(now, bytesPerSecond);
+            } else {
+                const int remainingChunks = doneChunks.size() - doneChunks.count(true);
+                // After a manual re-probe from a higher cached value, let
+                // already in-flight requests drain before timing four lanes.
+                const auto decision = autoConcurrency.sample(
+                    now, sessionTransferredBytes, remainingChunks,
+                    activeChunks.size() <= autoConcurrency.current());
+                if (decision.decision != AdaptiveParallelism::Decision::None) {
+                    if (decision.decision == AdaptiveParallelism::Decision::Increase) {
+                        note(QString("Adaptive: measured %1 MiB/s; testing %2 parallel chunks")
+                             .arg(decision.measuredMiBps, 0, 'f', 2)
+                             .arg(decision.concurrency));
+                    } else {
+                        note(QString("Adaptive: settled at %1 chunks (best observed %2 MiB/s)")
+                             .arg(decision.concurrency).arg(decision.bestMiBps, 0, 'f', 2));
+                        // Do not cache incomplete or error-induced measurements.
+                        if (decision.decision == AdaptiveParallelism::Decision::Settled &&
+                            decision.bestMiBps > 0) {
+                            adaptiveCache.save(base(), decision.concurrency,
+                                               decision.bestMiBps, QDateTime::currentMSecsSinceEpoch());
+                            if (!saveIdentity()) note("Adaptive: unable to persist measured optimum");
+                            else note("Adaptive: optimum cached for subsequent uploads");
+                        }
+                    }
+                    updateAdaptiveStatus();
+                    scheduleChunks();
                 }
-                updateAdaptiveStatus();
-                scheduleChunks();
             }
         }
         if (!busy) {
@@ -590,6 +691,7 @@ private:
             activeChunks.clear(); retryWaiting.clear(); attempts.clear();
             phase = Phase::Transferring;
             autoConcurrency.interrupt();
+            resetCachedMonitor();
             note(QString("Resuming %1: %2 / %3 MiB already present")
                  .arg(queue[fileIndex].relative).arg(double(confirmedBytes)/1048576.0,0,'f',1)
                  .arg(double(queue[fileIndex].size)/1048576.0,0,'f',1));
@@ -630,6 +732,7 @@ private:
         send("PUT", path, bytes, [this,index](int code, QJsonObject, QString error) {
             if (!busy || phase != Phase::Transferring) return;
             if (code >= 200 && code < 300) {
+                cachedChunkFailures = 0;
                 if (!doneChunks.testBit(index)) {
                     doneChunks.setBit(index);
                     const qint64 accepted = qMin(chunkSize, queue[fileIndex].size - qint64(index)*chunkSize);
@@ -646,14 +749,19 @@ private:
                 return;
             }
             if (!transient(code)) { stopped(QString("Chunk %1: %2").arg(index).arg(error)); return; }
-            if (adaptive->isChecked() && !autoConcurrency.settled()) {
-                const auto change = autoConcurrency.networkFailure();
-                if (change.decision == AdaptiveParallelism::Decision::Backoff) {
-                    note(QString("Adaptive: network error; backing off to %1 chunks").arg(change.concurrency));
-                } else {
-                    note("Adaptive: network error; discarding this measurement window");
+            if (adaptive->isChecked()) {
+                if (usingCachedConcurrency) {
+                    if (++cachedChunkFailures >= 3)
+                        reprobeAdaptive("repeated chunk request failures");
+                } else if (!autoConcurrency.settled()) {
+                    const auto change = autoConcurrency.networkFailure();
+                    if (change.decision == AdaptiveParallelism::Decision::Backoff) {
+                        note(QString("Adaptive: network error; backing off to %1 chunks").arg(change.concurrency));
+                    } else {
+                        note("Adaptive: network error; discarding this measurement window");
+                    }
+                    updateAdaptiveStatus();
                 }
-                updateAdaptiveStatus();
             }
             const int attempt = ++attempts[index];
             if (attempt == 1 || attempt % 5 == 0)
