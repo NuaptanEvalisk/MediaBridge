@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -216,4 +217,44 @@ func TestStalledChunkReleasesInFlightSlot(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("stalled chunk retained its slot after the idle deadline")
+}
+
+type endWithBytesReader struct {
+	data []byte
+}
+
+func (r *endWithBytesReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, io.EOF
+}
+
+func TestChunkReadAcceptsFinalBytesWithEOF(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		data      string
+		size      int
+		wantBytes int
+		wantError bool
+	}{
+		{"complete", "abcd", 4, 4, false},
+		{"incomplete", "abc", 4, 3, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("PUT", "/chunk", nil)
+			r.Body = io.NopCloser(&endWithBytesReader{data: []byte(tc.data)})
+			buffer := make([]byte, tc.size)
+			got, err := readChunkWithIdleDeadline(httptest.NewRecorder(), r, buffer, time.Second)
+			if got != tc.wantBytes || (err != nil) != tc.wantError {
+				t.Fatalf("received %d, error %v; expected %d, err=%v",
+					got, err, tc.wantBytes, tc.wantError)
+			}
+			if !tc.wantError && string(buffer) != tc.data {
+				t.Fatalf("data corrupted: %q", buffer)
+			}
+		})
+	}
 }

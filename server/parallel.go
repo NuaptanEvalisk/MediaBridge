@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,26 +20,32 @@ const chunkReadIdleTimeout = 30 * time.Second
 // rest of a 4 MiB body indefinitely. Refresh a read deadline after each
 // successful read, so slow but moving connections can finish while dead ones
 // reliably release their in-flight chunk slot.
-func readChunkWithIdleDeadline(w http.ResponseWriter, r *http.Request, buffer []byte, idle time.Duration) error {
+func readChunkWithIdleDeadline(w http.ResponseWriter, r *http.Request, buffer []byte, idle time.Duration) (int, error) {
 	controller := http.NewResponseController(w)
-	for offset := 0; offset < len(buffer); {
+	offset := 0
+	for offset < len(buffer) {
 		if err := controller.SetReadDeadline(time.Now().Add(idle)); err != nil && !errors.Is(err, http.ErrNotSupported) {
-			return err
+			return offset, err
 		}
 		n, err := r.Body.Read(buffer[offset:])
 		offset += n
+		// A Reader may return its final bytes together with io.EOF. These
+		// bytes are valid once the declared Content-Length is satisfied.
+		if offset == len(buffer) {
+			break
+		}
 		if err != nil {
-			return err
+			return offset, err
 		}
 		if n == 0 {
-			return io.ErrNoProgress
+			return offset, io.ErrNoProgress
 		}
 	}
 	// Only reset the connection deadline on success. When the body stalled,
 	// leave the expired deadline in place so net/http will not hang while
 	// trying to drain the abandoned request after the handler returns.
 	_ = controller.SetReadDeadline(time.Time{})
-	return nil
+	return offset, nil
 }
 
 // Clients consult this small authenticated endpoint before retrying a failed
@@ -266,8 +273,10 @@ func (s *Server) parallelChunkWithIdleTimeout(w http.ResponseWriter, r *http.Req
 		return
 	}
 	buffer := make([]byte, expected)
-	if err = readChunkWithIdleDeadline(w, r, buffer, idle); err != nil {
+	if received, readErr := readChunkWithIdleDeadline(w, r, buffer, idle); readErr != nil {
 		f.Close()
+		log.Printf("chunk body incomplete: upload=%s chunk=%d received=%d/%d error=%v",
+			u.ID, index, received, expected, readErr)
 		fail(w, 408, "chunk upload interrupted or timed out")
 		return
 	}
