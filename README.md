@@ -30,6 +30,11 @@ self-hosted project, not a turnkey commercial file-transfer service.
   may upload independently.
 - **Resumable uploads:** server-side chunk tracking survives interruptions and
   restarts. Transient network errors are retried automatically.
+- **Stalled-request recovery:** chunk-body idle deadlines release abandoned
+  upload slots. Before retrying a disconnected PUT, the desktop checks the
+  server's read-only chunk status, avoiding duplicate 4 MiB bodies when an
+  earlier request is still running. An already-confirmed chunk is never counted
+  again as new transfer throughput.
 - **File integrity:** SHA-256 verification before completed files appear at
   their destination.
 - **No destructive synchronization:** existing destination files are skipped,

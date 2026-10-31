@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 )
 
 const testID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -144,4 +147,73 @@ func TestMigrateLegacyPartialUpload(t *testing.T) {
 	if err != nil || !bytes.Equal(stored, data) {
 		t.Fatalf("migrated file corrupt: %v", err)
 	}
+}
+
+func TestStalledChunkReleasesInFlightSlot(t *testing.T) {
+	s := setup(t)
+	approveForTest(t, s)
+	data := bytes.Repeat([]byte("a"), int(parallelChunkSize))
+	id, _ := parallelStart(t, s, "Movies/Interrupted.mkv", data)
+	check := func() (bool, bool) {
+		t.Helper()
+		response := apiTest(t, s.parallelChunkStatus, "GET",
+			"/api/v2/uploads/x/chunks/0", nil, id, "0")
+		if response.Code != 200 {
+			t.Fatalf("status: %d %s", response.Code, response.Body.String())
+		}
+		var result struct {
+			Done       bool `json:"done"`
+			InProgress bool `json:"in_progress"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.Done, result.InProgress
+	}
+	if done, inProgress := check(); done || inProgress {
+		t.Fatal("new chunk incorrectly reported in progress")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("id", id)
+		r.SetPathValue("index", "0")
+		s.parallelChunkWithIdleTimeout(w, r, 150*time.Millisecond)
+	}))
+	defer server.Close()
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, err = fmt.Fprintf(conn, "PUT / HTTP/1.1\r\nHost: localhost\r\n"+
+		"X-MediaBridge-Device: %s\r\nAuthorization: Bearer %s\r\n"+
+		"Content-Length: %d\r\nContent-Type: application/octet-stream\r\n"+
+		"Connection: close\r\n\r\n", testID, testToken, parallelChunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Send only the headers, deliberately leaving the backend waiting for
+	// bytes which will never arrive, as with a broken Tailscale TCP relay.
+	deadline := time.Now().Add(2 * time.Second)
+	seen := false
+	for time.Now().Before(deadline) {
+		if _, inProgress := check(); inProgress {
+			seen = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !seen {
+		t.Fatal("stalled request never acquired its chunk slot")
+	}
+	for time.Now().Before(deadline) {
+		if done, inProgress := check(); !done && !inProgress {
+			putParallel(t, s, id, 0, data)
+			if done, inProgress := check(); !done || inProgress {
+				t.Fatal("recovered chunk should be completed without a stale lock")
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("stalled chunk retained its slot after the idle deadline")
 }

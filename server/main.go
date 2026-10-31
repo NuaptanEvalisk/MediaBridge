@@ -84,6 +84,7 @@ func main() {
 	data.HandleFunc("PUT /api/v1/uploads/{id}/chunk", s.chunk)
 	data.HandleFunc("POST /api/v1/uploads/{id}/finalize", s.finalize)
 	data.HandleFunc("POST /api/v2/uploads", s.startParallelUpload)
+	data.HandleFunc("GET /api/v2/uploads/{id}/chunks/{index}", s.parallelChunkStatus)
 	data.HandleFunc("PUT /api/v2/uploads/{id}/chunks/{index}", s.parallelChunk)
 	data.HandleFunc("POST /api/v2/uploads/{id}/finalize", s.finalizeParallel)
 	adminSrv := &http.Server{Addr: env("MB_ADMIN_LISTEN", ":8080"), Handler: s.guardAdmin(admin), ReadHeaderTimeout: 5 * time.Second}

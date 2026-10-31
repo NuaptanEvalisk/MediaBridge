@@ -13,6 +13,63 @@ import (
 )
 
 const parallelChunkSize int64 = 4 << 20
+const chunkReadIdleTimeout = 30 * time.Second
+
+// A broken TCP forwarding connection can leave the backend waiting for the
+// rest of a 4 MiB body indefinitely. Refresh a read deadline after each
+// successful read, so slow but moving connections can finish while dead ones
+// reliably release their in-flight chunk slot.
+func readChunkWithIdleDeadline(w http.ResponseWriter, r *http.Request, buffer []byte, idle time.Duration) error {
+	controller := http.NewResponseController(w)
+	for offset := 0; offset < len(buffer); {
+		if err := controller.SetReadDeadline(time.Now().Add(idle)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		n, err := r.Body.Read(buffer[offset:])
+		offset += n
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	// Only reset the connection deadline on success. When the body stalled,
+	// leave the expired deadline in place so net/http will not hang while
+	// trying to drain the abandoned request after the handler returns.
+	_ = controller.SetReadDeadline(time.Time{})
+	return nil
+}
+
+// Clients consult this small authenticated endpoint before retrying a failed
+// chunk. It avoids repeatedly sending multi-megabyte request bodies against
+// an old in-flight request and distinguishes server-confirmed completion.
+func (s *Server) parallelChunkStatus(w http.ResponseWriter, r *http.Request) {
+	u, ok := s.ownedUpload(r)
+	if !ok {
+		fail(w, 403, "unapproved or unknown upload")
+		return
+	}
+	index, err := strconv.Atoi(r.PathValue("index"))
+	if err != nil || index < 0 || index >= numberOfChunks(u.Size) {
+		fail(w, 400, "invalid chunk index")
+		return
+	}
+	s.store.mu.Lock()
+	current := s.store.data.Uploads[u.ID]
+	d := s.store.data.Devices[u.Owner]
+	if current == nil || d == nil || d.State != "approved" {
+		s.store.mu.Unlock()
+		fail(w, 403, "upload not permitted")
+		return
+	}
+	done := hasBit(current.Bitmap, index)
+	s.store.mu.Unlock()
+	s.uploadMu.Lock()
+	inProgress := s.inFlight[u.ID][index]
+	s.uploadMu.Unlock()
+	respond(w, 200, map[string]any{"done": done, "in_progress": inProgress})
+}
 
 func numberOfChunks(size int64) int {
 	return int((size + parallelChunkSize - 1) / parallelChunkSize)
@@ -145,6 +202,10 @@ func (s *Server) startParallelUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) parallelChunk(w http.ResponseWriter, r *http.Request) {
+	s.parallelChunkWithIdleTimeout(w, r, chunkReadIdleTimeout)
+}
+
+func (s *Server) parallelChunkWithIdleTimeout(w http.ResponseWriter, r *http.Request, idle time.Duration) {
 	u, ok := s.ownedUpload(r)
 	if !ok {
 		fail(w, 403, "unapproved or unknown upload")
@@ -205,9 +266,9 @@ func (s *Server) parallelChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	buffer := make([]byte, expected)
-	if _, err = io.ReadFull(r.Body, buffer); err != nil {
+	if err = readChunkWithIdleDeadline(w, r, buffer, idle); err != nil {
 		f.Close()
-		fail(w, 400, "incomplete chunk body")
+		fail(w, 408, "chunk upload interrupted or timed out")
 		return
 	}
 	n, err := f.WriteAt(buffer, offset)

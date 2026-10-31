@@ -325,7 +325,8 @@ private:
     void send(const QByteArray &method, const QString &path, const QByteArray &body,
               const Done &done, bool authorized = true) {
         QNetworkRequest req(QUrl(base() + path));
-        req.setTransferTimeout(90000);
+        req.setTransferTimeout(method == "GET" && path.contains("/chunks/")
+                                   ? 15000 : 90000);
         if (authorized) {
             req.setRawHeader("X-MediaBridge-Device", id.toUtf8());
             req.setRawHeader("Authorization", "Bearer " + token.toUtf8());
@@ -564,7 +565,7 @@ private:
         else if (phase == Phase::Transferring) {
             const auto pending = retryWaiting.values();
             retryWaiting.clear();
-            for (int i : pending) sendChunk(i);
+            for (int i : pending) pollChunkStatus(i);
             scheduleChunks();
         }
     }
@@ -776,6 +777,56 @@ private:
         }
         if (activeChunks.isEmpty() && confirmedBytes == queue[fileIndex].size) finalizeHash();
     }
+    void confirmChunk(int index, bool transferredNow) {
+        if (!doneChunks.testBit(index)) {
+            doneChunks.setBit(index);
+            const qint64 accepted = qMin(chunkSize, queue[fileIndex].size - qint64(index)*chunkSize);
+            confirmedBytes += accepted;
+            // A chunk recovered through the status API was already stored
+            // by the server; it is not new throughput for this request.
+            if (transferredNow) sessionTransferredBytes += accepted;
+        }
+        activeChunks.remove(index);
+        retryWaiting.remove(index);
+        attempts.remove(index);
+        updateProgress();
+        scheduleChunks();
+    }
+    void pollChunkStatus(int index) {
+        if (!busy || phase != Phase::Transferring || !activeChunks.contains(index)) return;
+        if (paused) { retryWaiting.insert(index); return; }
+        const QString expectedUpload = uploadId;
+        const QString path = QString("/api/v2/uploads/%1/chunks/%2").arg(uploadId).arg(index);
+        send("GET", path, {}, [this,index,expectedUpload](int code, QJsonObject result, QString error) {
+            if (!busy || phase != Phase::Transferring ||
+                uploadId != expectedUpload || !activeChunks.contains(index)) return;
+            if (paused) { retryWaiting.insert(index); return; }
+            if (code == 200) {
+                if (result.value("done").toBool()) {
+                    note(QString("Chunk %1 confirmed by server after interrupted response").arg(index));
+                    confirmChunk(index, false);
+                    return;
+                }
+                if (result.value("in_progress").toBool()) {
+                    // Never upload a duplicate body while a prior PUT still
+                    // owns the server slot. Wait for completion or idle timeout.
+                    QTimer::singleShot(4000, this, [this,index,expectedUpload] {
+                        if (uploadId == expectedUpload) pollChunkStatus(index);
+                    });
+                    return;
+                }
+                sendChunk(index);
+                return;
+            }
+            if (code == 400 || code == 403 || code == 404) {
+                stopped(QString("Chunk %1 status: HTTP %2 (%3)").arg(index).arg(code).arg(error));
+                return;
+            }
+            QTimer::singleShot(5000, this, [this,index,expectedUpload] {
+                if (uploadId == expectedUpload) pollChunkStatus(index);
+            });
+        });
+    }
     void sendChunk(int index) {
         if (!busy || paused || phase != Phase::Transferring) {
             retryWaiting.insert(index);
@@ -793,27 +844,21 @@ private:
             stopped("Local file changed during upload: " + entry.absolute); return;
         }
         const QString path = QString("/api/v2/uploads/%1/chunks/%2").arg(uploadId).arg(index);
-        send("PUT", path, bytes, [this,index](int code, QJsonObject, QString error) {
+        send("PUT", path, bytes, [this,index](int code, QJsonObject result, QString error) {
             if (!busy || phase != Phase::Transferring) return;
             if (code >= 200 && code < 300) {
                 cachedChunkFailures = 0;
-                if (!doneChunks.testBit(index)) {
-                    doneChunks.setBit(index);
-                    const qint64 accepted = qMin(chunkSize, queue[fileIndex].size - qint64(index)*chunkSize);
-                    confirmedBytes += accepted;
-                    // Only chunks confirmed in this session contribute to
-                    // throughput. Restored progress must not inflate speed.
-                    sessionTransferredBytes += accepted;
-                }
-                activeChunks.remove(index);
-                retryWaiting.remove(index);
-                attempts.remove(index);
-                updateProgress();
-                scheduleChunks();
+                confirmChunk(index, !result.value("already_done").toBool());
                 return;
             }
             if (!transient(code)) { stopped(QString("Chunk %1: %2").arg(index).arg(error)); return; }
-            if (adaptive->isChecked()) {
+            // One isolated missing chunk has no parallelism to optimize.
+            // 409 "chunk already in progress" is a server-side conflict, not
+            // evidence that the cached concurrency is too high.
+            const bool enoughWork = doneChunks.size() - doneChunks.count(true) >
+                                    targetConcurrency() * 2;
+            if (adaptive->isChecked() && enoughWork &&
+                !(code == 409 && error.contains("already in progress"))) {
                 if (usingCachedConcurrency) {
                     if (++cachedChunkFailures >= 3)
                         reprobeAdaptive("repeated chunk request failures");
@@ -833,7 +878,7 @@ private:
                      .arg(index).arg(code).arg(error));
             QTimer::singleShot(retryDelay(attempt-1), this, [this,index] {
                 if (!busy || phase != Phase::Transferring || !activeChunks.contains(index)) return;
-                sendChunk(index);
+                pollChunkStatus(index);
             });
         });
     }
